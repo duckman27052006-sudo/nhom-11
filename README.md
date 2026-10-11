@@ -42,7 +42,7 @@ Bố cục chia **4 trang** để không dồn hết chức năng vào một mà
 | **Tổng quan** | Hero đổi theo trạng thái server, lưới số liệu 2×2 cạnh hoạt động gần đây, 2 lối tắt nhanh + liên kết phụ |
 | **Truyền file** | Một hàng **"Đích đến"** dùng chung cho cả hai chiều · Tải về \| Gửi lên · bảng File trên server (bấm hàng để điền ô tải về), banner lỗi + toast |
 | **Máy chủ** | Cấu hình theo khối dọc (lắng nghe, thư mục, 3 giới hạn đều nhau, tùy chọn 2×2) + bảng file (trạng thái trống có nút hành động), bấm đúp để điền vào ô tải về |
-| **Nhật ký** | Log thời gian thực của cả server lẫn client, lọc theo mức, tự cuộn + nút Về cuối, lưu ra file |
+| **Nhật ký** | Luồng gói client trực tiếp (RRQ/WRQ/OACK/DATA/ACK/ERROR), log thời gian thực, lọc mức, lưu log và nút mở Wireshark |
 
 Chi tiết ngôn ngữ thiết kế xem `GUI_REDESIGN.md`.
 
@@ -242,11 +242,28 @@ Mỗi bên đo: số phiên (bắt đầu / hoàn tất / timeout), số gói ti
 
 ## 8. Kiểm tra bằng Wireshark
 
+Trong GUI, mở trang **Nhật ký** rồi bấm **Mở Wireshark**. Nếu tìm thấy
+`dumpcap.exe` và Npcap Loopback Adapter, GUI tự bắt đầu capture UDP trên loopback,
+cấu hình Decode As cho cổng server và lọc hiển thị `udp && ip.addr == 127.0.0.1`.
+Nhờ đó gói SSDP/multicast từ thiết bị LAN không làm nhiễu danh sách, trong khi
+DATA/ACK qua TID tạm vẫn hiện kể cả khi Wireshark chưa nhận dạng là TFTP. Một số
+gói có thể mang nhãn UDP; nhấp phải gói rồi chọn **Follow → UDP Stream** để xem
+trao đổi. Nếu không tìm thấy adapter, chọn Npcap Loopback Adapter trong Wireshark,
+dùng display filter trên và bấm Start. Bắt gói trước khi truyền file. Luồng gói
+trong GUI là trace phía client; Wireshark cho thấy datagram thật trên mạng.
+
+Trên Windows, dùng adapter **Npcap Loopback Adapter** khi client/server cùng máy.
+Không đặt capture filter `udp port 6969`: sau RRQ/WRQ, TFTP chuyển sang TID dùng
+port UDP tạm. Dùng capture filter `udp and host 127.0.0.1` và display filter
+`udp && ip.addr == 127.0.0.1`; không dùng display filter `tftp` đơn lẻ vì một số
+Wireshark không giải mã DATA/ACK trên TID tạm. Nếu cần, chọn gói đầu tiên đến
+port 6969 → chuột phải → **Decode As…** → TFTP.
+
 ```bash
-tshark -i any -f "udp port 6969" -Y "tftp" -V
+tshark -i any -f "udp and host 127.0.0.1" -Y "udp && ip.addr == 127.0.0.1" -V
 ```
 
-Bộ lọc hiển thị đúng chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 → ...`
+Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 → ...`.
 
 ## 9. Đặc điểm đã triển khai
 

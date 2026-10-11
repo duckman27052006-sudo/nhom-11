@@ -1,0 +1,48 @@
+[project]
+name = "trivial-file-transfer-protocol"
+version = "1.0.0"
+description = "Ban cai dat TFTP hoan chinh theo RFC 1350 kem TFTP Option Extension (RFC 2347)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# GUI là tuỳ chọn: lõi server/client vẫn chỉ dùng thư viện chuẩn.
+gui = ["PySide6>=6.5"]
+dev = ["ruff>=0.5", "mypy>=1.5"]
+
+[project.scripts]
+tftp-server = "src.tftp_server:main"
+tftp-client = "src.tftp_client:main"
+tftp-gui = "src.tftp_gui:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true

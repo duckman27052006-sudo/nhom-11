@@ -748,6 +748,21 @@ class TftpServer:
         with self._lock:
             return len(self._sessions)
 
+    def wait_for_idle(self, timeout: float = 5.0, poll_interval: float = 0.01) -> bool:
+        """Poll cho tới khi tất cả session server đã kết thúc.
+
+        Không assert ngay vì session thread có thể còn ở trạng thái "đang đóng"
+        trong vài ms sau khi client kết thúc. Điều này tránh race flaky trong
+        test và trong shutdown.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            if self.active_sessions == 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(max(0.0, float(poll_interval)))
+
     def resolve_path(self, filename: str) -> str | None:
         """Chuyển tên file client gửi thành đường dẫn an toàn trong `root`.
 
@@ -986,6 +1001,7 @@ class TftpServer:
                 pass
         for session in sessions:
             session.join(timeout=5)
+        self.wait_for_idle(timeout=5.0)
         self.log.info("server đã dừng")
         if self.metrics.counter("sessions.started.RRQ") or self.metrics.counter(
             "sessions.started.WRQ"

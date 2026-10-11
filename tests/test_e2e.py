@@ -53,6 +53,7 @@ class ServerHarness:
 
     def __exit__(self, *exc_info) -> None:
         self.server.shutdown()
+        self.server.wait_for_idle(timeout=5.0)
         self.thread.join(timeout=5)
         self.dir.cleanup()
 

@@ -4,24 +4,49 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+env/
 .env/
+__pypackages__/
+.mypy_cache/
 
 # Test / coverage
 .ruff_cache/
 .pytest_cache/
+.tox/
 .coverage
+.coverage.*
 htmlcov/
 coverage.xml
 *.cover
 
-# Logs / temp TFTP
+# Logs / output cua lenh chay
 *.log
 *.tftp-*.part
 *.part
+# --stats-json / --stats cua server & client
+metrics.json
+*-metrics.json
+*-stats.json
+
+# Thu muc goc cua TFTP: chi giu file mau, file nguoi dung up/download se khong
+# bao gio duoc commit. Luu y dung `files/*` (khu viet `files/`) de cac quy tac
+# `!files/...` ben duoi con hieu luc.
+files/*
+!files/empty.dat
+!files/hello.txt
+!files/sample.bin
+!files/test1
+
+# File sua doi / ban tin cuc bo
+*.orig
+*.rej
+*.bak
+*~
 
 # OS / IDE
 .DS_Store
 Thumbs.db
+desktop.ini
 .vscode/
 .idea/
 
@@ -29,3 +54,4 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+pip-wheel-metadata/

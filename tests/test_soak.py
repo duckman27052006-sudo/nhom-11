@@ -90,13 +90,16 @@ class LossyProxy(threading.Thread):
         self._upstream = ("127.0.0.1", server_port)
         self._downstream: tuple[str, int] | None = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        # Đặt tên _stop_event, KHÔNG phải _stop: attribute _stop là method
+        # nội bộ của threading.Thread, đè nó khiến join() (Python ≤3.12)
+        # raise TypeError: 'Event' object is not callable.
+        self._stop_event = threading.Event()
 
     def _should_drop(self) -> bool:
         return self.rng.randrange(100) < self.drop_percent
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 raw, source = self._client.recvfrom(65535)
             except (TimeoutError, OSError):
@@ -144,7 +147,7 @@ class LossyProxy(threading.Thread):
                 self.forwarded += 1
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=5)
         for sock in (self._client, self._server):
             try:
@@ -417,6 +420,15 @@ class TestNoResourceLeak(unittest.TestCase):
                     client.download("cycle.bin", str(Path(out) / f"back-{cycle}.bin"))
                     durations.append(time.monotonic() - started)
                     self.assertEqual(Path(out, f"back-{cycle}.bin").read_bytes(), payload)
+                    # Client trả về trước khi thread phiên server chạy hết finally
+                    # (gỡ khỏi _sessions) — chờ có giới hạn thay vì assert ngay,
+                    # tránh flaky trên runner chậm.
+                    deadline = time.monotonic() + 5.0
+                    while (
+                        srv.server.active_sessions != 0
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.01)
                     self.assertEqual(srv.server.active_sessions, 0)
 
             leftovers = [p.name for p in Path(srv.root).iterdir() if p.suffix == ".part"]

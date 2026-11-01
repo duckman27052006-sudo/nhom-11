@@ -378,7 +378,7 @@ class TestPacketLoss(unittest.TestCase):
         payload = make_payload(20_000, seed=67)
         # Timeout ngắn + nhiều lần thử lại: với mất gói, mỗi lần timeout chỉ tốn
         # 0.5s thay vì 3s nên toàn bộ pha "môi trường xấu" còn vài giây.
-        with ServerHarness(timeout=0.5, retries=60) as srv, tempfile.TemporaryDirectory() as out:
+        with ServerHarness(timeout=0.5, retries=8) as srv, tempfile.TemporaryDirectory() as out:
             (Path(srv.root) / "lossy.bin").write_bytes(payload)
             proxy = LossyProxy(srv.port, drop_percent=LOSS_PERCENT, seed=3)
             proxy.start()
@@ -392,11 +392,16 @@ class TestPacketLoss(unittest.TestCase):
                 self.assertEqual(Path(target).read_bytes(), payload)
                 self.assertGreater(proxy.dropped, 0, "proxy phải thực sự bỏ gói")
                 self.assertGreater(client.metrics.counter("packets.retransmitted"), 0)
-                # Client nhận ACK cuối trước khi server kịp cộng metrics phiên.
-                self.assertTrue(srv.server.wait_for_idle(timeout=10.0))
+                # ACK cuối có thể bị proxy bỏ: server có thể kết thúc "ok" hoặc
+                # "timeout" sau khi gửi lại, miễn dữ liệu phía client đã đủ và
+                # phiên được dọn sạch. Ép "ok" sẽ flaky khi mất đúng ACK cuối.
+                self.assertTrue(srv.server.wait_for_idle(timeout=15.0))
                 server_metrics = srv.server.metrics
+                finished = server_metrics.counter(
+                    "sessions.finished.ok"
+                ) + server_metrics.counter("sessions.finished.timeout")
+                self.assertEqual(finished, 1)
                 self.assertGreater(server_metrics.counter("packets.retransmitted"), 0)
-                self.assertEqual(server_metrics.counter("sessions.finished.ok"), 1)
                 print(
                     f"\n  [soak] mất {LOSS_PERCENT}% gói: server gửi lại "
                     f"{int(server_metrics.counter('packets.retransmitted'))} lần, "

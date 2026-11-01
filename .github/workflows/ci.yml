@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Chạy khi merge vào main và cho mọi PR; không chạy lặp trên nhánh feature
+  # (push + pull_request sẽ tạo 2 run trùng cho cùng một commit).
   push:
+    branches: [main]
   pull_request:
 
 jobs:

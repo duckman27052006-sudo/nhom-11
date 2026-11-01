@@ -161,6 +161,44 @@ form.addEventListener("submit", async (event) => {
 
 
 # ------------------------------------------------------------------ tiện ích ---
+# Không dùng `is_private`: hành vi của nó khác nhau giữa các bản Python (3.10 coi
+# 0.0.0.0/0 là private), có thể mở allowlist thành toàn bộ IPv4. Kiểm tra tường
+# minh theo RFC 1918/4193, loopback và link-local.
+_PRIVATE_RANGES: tuple[Network, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "fc00::/7",
+        "::1/128",
+        "fe80::/10",
+    )
+)
+
+
+def _is_private_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(address in network for network in _PRIVATE_RANGES)
+
+
+def _is_private_network(network: Network) -> bool:
+    """True nếu toàn bộ network nằm trong một dải private/loopback/link-local."""
+    for private in _PRIVATE_RANGES:
+        if isinstance(network, ipaddress.IPv4Network) and isinstance(
+            private, ipaddress.IPv4Network
+        ):
+            if network.subnet_of(private):
+                return True
+        elif isinstance(network, ipaddress.IPv6Network) and isinstance(
+            private, ipaddress.IPv6Network
+        ):
+            if network.subnet_of(private):
+                return True
+    return False
+
+
 def validate_host(value: str) -> str:
     """Chỉ chấp nhận địa chỉ private/loopback cụ thể (fail-closed)."""
     text = (value or "").strip()
@@ -170,7 +208,7 @@ def validate_host(value: str) -> str:
         raise ValueError("--host phải là địa chỉ IP cụ thể (không dùng hostname)") from exc
     if address.is_unspecified:
         raise ValueError("--host không được là wildcard 0.0.0.0/::")
-    if not (address.is_private or address.is_loopback):
+    if not _is_private_address(address):
         raise ValueError("--host phải là địa chỉ private/loopback")
     return str(address)
 
@@ -186,7 +224,7 @@ def parse_networks(values: list[str] | None) -> list[Network]:
             network = ipaddress.ip_network(text, strict=False)
         except ValueError as exc:
             raise ValueError(f"--allowed-network không hợp lệ: {raw!r}") from exc
-        if not (network.is_private or network.is_loopback):
+        if not _is_private_network(network):
             raise ValueError(f"--allowed-network phải là private/loopback: {raw!r}")
         networks.append(network)
     return networks

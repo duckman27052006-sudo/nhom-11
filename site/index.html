@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#17211f">
+    <meta name="description" content="Mở cổng gửi file TFTP trong mạng Wi-Fi nội bộ của bạn.">
+    <title>Mở cổng gửi file · TFTP</title>
+    <link rel="stylesheet" href="./site.css">
+    <script src="./site.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="TFTP, trang chủ">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>TFTP<span class="brand-light"> DROP</span></span>
+      </a>
+      <span class="host-label">GITHUB PAGES</span>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">CỔNG VÀO MẠNG NỘI BỘ</p>
+        <h1 id="page-title">Gửi file tới<br><span>máy chủ TFTP.</span></h1>
+        <p class="intro-copy">
+          Kết nối cùng Wi-Fi với máy chủ, nhập địa chỉ cổng upload nội bộ để tiếp tục.
+        </p>
+      </section>
+
+      <section class="handoff" aria-label="Mở cổng upload nội bộ">
+        <form id="lan-form" novalidate>
+          <label for="lan-url">Địa chỉ cổng upload trong mạng của bạn</label>
+          <div class="field-row">
+            <input
+              id="lan-url"
+              name="lan-url"
+              type="url"
+              inputmode="url"
+              autocomplete="url"
+              placeholder="http://192.168.1.10:8080"
+              aria-describedby="address-help address-error"
+              required
+            >
+            <button type="submit">Mở cổng upload <span aria-hidden="true">↗</span></button>
+          </div>
+          <p class="help" id="address-help">
+            Ví dụ: <code>http://192.168.1.10:8080</code>. Địa chỉ này do người quản lý máy chủ cung cấp.
+          </p>
+          <p class="error" id="address-error" role="alert" hidden></p>
+        </form>
+
+        <div class="saved-address" id="saved-address" hidden>
+          <span>Địa chỉ đã lưu trên trình duyệt này</span>
+          <button type="button" id="clear-address">Xóa địa chỉ</button>
+        </div>
+      </section>
+
+      <section class="instructions" aria-label="Cách sử dụng">
+        <h2>Trước khi gửi</h2>
+        <ol>
+          <li>Thiết bị phải kết nối cùng mạng Wi-Fi với máy chủ.</li>
+          <li>Nhập địa chỉ LAN của cổng upload rồi mở trang đó.</li>
+          <li>Chọn file và gửi. Máy chủ chuyển file tới TFTP qua WRQ.</li>
+        </ol>
+      </section>
+
+      <footer class="privacy-note">
+        <span class="lock-mark" aria-hidden="true">i</span>
+        <p>
+          Trang GitHub này chỉ giúp mở đúng địa chỉ trong LAN. Nó không nhận hay tải file lên GitHub.
+          File chỉ được gửi tới máy chủ khi thiết bị truy cập được cổng LAN.
+        </p>
+      </footer>
+    </main>
+  </body>
+</html>

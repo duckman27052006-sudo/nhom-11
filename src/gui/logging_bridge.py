@@ -48,7 +48,9 @@ class QtLogHandler(logging.Handler):
     def __init__(self, signal, level: int = logging.INFO) -> None:
         super().__init__(level)
         self._signal = signal
-        self.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
+        self.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+        )
         self.addFilter(NameFilter())
 
     def emit(self, record: logging.LogRecord) -> None:

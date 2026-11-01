@@ -25,16 +25,19 @@ from dataclasses import dataclass
 
 from . import DEFAULT_PORT, enable_utf8_console, tftp_errors
 from .tftp_metrics import Metrics
+from .tftp_net import Addr, resolve_remote
 from .tftp_packet import (
     ACK,
     DATA,
     DEFAULT_BLKSIZE,
     DEFAULT_TIMEOUT,
+    ERROR,
+    MAX_BLKSIZE,
     MAX_DATAGRAM,
     MAX_STALE_PACKETS,
+    MIN_BLKSIZE,
     OP_ACK,
     OP_DATA,
-    OP_ERROR,
     OP_OACK,
     OPTION_BLKSIZE,
     OPTION_TIMEOUT,
@@ -61,8 +64,8 @@ ProgressFn = Callable[[int, int | None], None]
 class _ClientState:
     """State của một lượt truyền (2.3): thay Dict[str, object] dễ KeyError."""
 
-    tid: tuple[str, int] | None = None
-    target: tuple[str, int] = ("", 0)
+    tid: Addr | None = None
+    target: Addr = ("", 0)
 
 
 class TftpClient:
@@ -83,13 +86,16 @@ class TftpClient:
     ) -> None:
         self.host = host
         self.port = port
-        self.timeout = timeout
+        if timeout <= 0:
+            raise ValueError("timeout phải > 0")
+        self.timeout = float(timeout)
         self.retries = max(1, retries)
-        self.blksize = max(8, blksize)
+        self.blksize = min(max(blksize, MIN_BLKSIZE), MAX_BLKSIZE)
         self.mode = mode
         self.use_options = use_options
         self.log = logger or LOG
         self.metrics = metrics if metrics is not None else Metrics("tftp.client")
+        self._family: int = socket.AF_INET
         self._state = _ClientState(target=(host, port))
         self._sent_at = 0.0
 
@@ -104,7 +110,7 @@ class TftpClient:
         self.log.warning(message)
 
     def _open_socket(self, timeout: float | None = None) -> socket.socket:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = socket.socket(self._family, socket.SOCK_DGRAM)
         sock.settimeout(self.timeout if timeout is None else timeout)
         return sock
 
@@ -127,14 +133,16 @@ class TftpClient:
             options[OPTION_TSIZE] = "0"
         return options
 
-    def _apply_oack(self, packet, blksize: int, timeout: float) -> tuple[int, float, int | None]:
+    def _apply_oack(self, packet, timeout: float) -> tuple[int, float, int | None]:
         """Tính blksize/timeout/tsize đã thương lượng, KHÔNG đụng vào self (2.2).
 
-        Trả về (blksize, timeout, tsize). Giá trị ngoài range thì giữ nguyên
-        giá trị đề nghị (đúng RFC 2347: client phải chấp nhận giá trị server trả).
+        Trả về (blksize, timeout, tsize). RFC 2347: option nào không có trong
+        OACK thì dùng giá trị mặc định — riêng blksize mặc định là 512, không
+        phải giá trị client đề nghị (nếu giữ 1468 thì hai bên lệch blksize và
+        truyền dừng sau block đầu).
         """
         values = parse_options(packet)
-        new_blksize = blksize
+        new_blksize = DEFAULT_BLKSIZE
         new_timeout = timeout
         tsize: int | None = None
         negotiated = values.get(OPTION_BLKSIZE)
@@ -148,7 +156,7 @@ class TftpClient:
         return new_blksize, new_timeout, tsize
 
     # -------------------------------------------------------- gửi / nhận gói ---
-    def _target(self) -> tuple[str, int]:
+    def _target(self) -> Addr:
         return self._state.target
 
     def _send(self, sock: socket.socket, packet, *, retransmit: bool = False) -> None:
@@ -170,7 +178,7 @@ class TftpClient:
             except TimeoutError:
                 return None
             if tid is None:
-                if source[0] != self.host:
+                if source[0] != self._state.target[0]:
                     self.metrics.incr("packets.foreign_host")
                     self._warn(f"bỏ qua gói từ host lạ {source[0]}")
                     continue
@@ -193,7 +201,7 @@ class TftpClient:
                 raise
 
             self._debug(f"<- {describe(packet)}")
-            if packet.OPCODE == OP_ERROR:
+            if isinstance(packet, ERROR):
                 self.metrics.incr(f"errors.received.{packet.code}")
                 raise tftp_errors.TftpRemoteError(packet.code, packet.message)
             if packet.OPCODE not in accept_ops:
@@ -240,7 +248,8 @@ class TftpClient:
             self._send(sock, packet, retransmit=True)
 
     def _new_state(self) -> None:
-        self._state = _ClientState(tid=None, target=(self.host, self.port))
+        self._family, target = resolve_remote(self.host, self.port)
+        self._state = _ClientState(tid=None, target=target)
 
     def _log_block(self, block: int, size: int, total: int) -> None:
         if block <= 3 or block % 50 == 0:
@@ -289,7 +298,6 @@ class TftpClient:
         sock = self._open_socket()
         started = time.monotonic()
         # 2.2: blksize/timeout thương lượng giữ trong biến local, không đụng self.
-        block_size = self.blksize if self.use_options else DEFAULT_BLKSIZE
         cur_timeout = self.timeout
         negotiated_size: int | None = None
         self._info(
@@ -309,7 +317,7 @@ class TftpClient:
             with open(local, "wb") as handle:
                 if first.OPCODE == OP_OACK:
                     wire_blksize, cur_timeout, negotiated_size = self._apply_oack(
-                        first, block_size, cur_timeout
+                        first, cur_timeout
                     )
                     if not self.use_options:
                         wire_blksize = DEFAULT_BLKSIZE
@@ -327,7 +335,7 @@ class TftpClient:
                     wire_blksize = DEFAULT_BLKSIZE
 
                 while True:
-                    # Decoder giữ nối cặp CRLF bị tách giữa 2 DATA block.
+                    # Decoder giữ nối cặp CR LF / CR NUL bị tách giữa 2 DATA block.
                     payload = decoder.feed(packet.data) if decoder is not None else packet.data
                     handle.write(payload)
                     total += len(payload)
@@ -362,7 +370,6 @@ class TftpClient:
         self._new_state()
         sock = self._open_socket()
         started = time.monotonic()
-        block_size = self.blksize if self.use_options else DEFAULT_BLKSIZE
         cur_timeout = self.timeout
         self._info(
             f"WRQ {local} -> {remote} (mode={self.mode}, blksize={self.blksize}, "
@@ -376,9 +383,7 @@ class TftpClient:
             first = self._exchange(sock, request, (OP_OACK, OP_ACK), None)
             self.metrics.observe("transfer.ttfb", time.monotonic() - started)
             if first.OPCODE == OP_OACK:
-                wire_blksize, cur_timeout, _ = self._apply_oack(
-                    first, block_size, cur_timeout
-                )
+                wire_blksize, cur_timeout, _ = self._apply_oack(first, cur_timeout)
                 if not self.use_options:
                     wire_blksize = DEFAULT_BLKSIZE
                 try:
@@ -409,7 +414,6 @@ class TftpClient:
                         progress(sent_total, size)
                     if len(chunk) < wire_blksize:
                         break
-            self.metrics.incr("payload.sent", sent_total)
             self._summary("gửi lên", remote, sent_total, block, started)
             return remote
         finally:
@@ -456,6 +460,29 @@ def _parse_server(value: str) -> tuple[str, int]:
     return text, DEFAULT_PORT
 
 
+def _positive_seconds(value: str) -> float:
+    """Kiểm tra --timeout > 0; 0 hoặc âm làm socket non-blocking / settimeout lỗi."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"không phải số: {value!r}") from None
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("--timeout phải > 0")
+    return seconds
+
+
+def _blksize_value(value: str) -> int:
+    try:
+        size = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"không phải số nguyên: {value!r}") from None
+    if not MIN_BLKSIZE <= size <= MAX_BLKSIZE:
+        raise argparse.ArgumentTypeError(
+            f"--blocksize phải trong {MIN_BLKSIZE}..{MAX_BLKSIZE}"
+        )
+    return size
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     from . import __version__
 
@@ -483,12 +510,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--blocksize",
-        type=int,
+        type=_blksize_value,
         default=DEFAULT_BLKSIZE,
         help="kích thước khối mong muốn (byte)",
     )
     parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_TIMEOUT, help="thời gian chờ (giây)"
+        "--timeout", type=_positive_seconds, default=DEFAULT_TIMEOUT, help="thời gian chờ (giây)"
     )
     parser.add_argument("--retries", type=int, default=5, help="số lần thử lại tối đa")
     parser.add_argument(
@@ -507,11 +534,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_direction_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Bắt các cờ vô nghĩa theo chiều truyền thay vì lặng lẽ bỏ qua."""
+    if args.put and args.save:
+        parser.error("--save chỉ dùng với --get")
+    if args.get and args.remote:
+        parser.error("--remote chỉ dùng với --put")
+
+
 def main(argv: list | None = None) -> int:
     enable_utf8_console()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    handlers: list[logging.Handler] = []
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.log_file:
         try:
             handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
@@ -522,22 +557,27 @@ def main(argv: list | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
-        handlers=handlers or None,
+        handlers=handlers,
     )
     try:
         host, port = _parse_server(args.server)
     except ValueError as exc:
         parser.error(str(exc))
         return 2
-    client = TftpClient(
-        host,
-        port,
-        timeout=args.timeout,
-        retries=args.retries,
-        blksize=args.blocksize,
-        mode=args.mode,
-        use_options=not args.no_options,
-    )
+    validate_direction_args(parser, args)
+    try:
+        client = TftpClient(
+            host,
+            port,
+            timeout=args.timeout,
+            retries=args.retries,
+            blksize=args.blocksize,
+            mode=args.mode,
+            use_options=not args.no_options,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+        return 2
     try:
         if args.get:
             local = args.save or os.path.basename(args.get) or "download.out"

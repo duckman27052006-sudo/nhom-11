@@ -119,7 +119,9 @@ class TestDownload(unittest.TestCase):
         with ServerHarness({"text.txt": payload}) as srv, tempfile.TemporaryDirectory() as out:
             target = str(Path(out) / "text.txt")
             srv.client(mode="netascii").download("text.txt", target)
-            self.assertEqual(Path(target).read_bytes(), b"dong mot\ndong hai\nhet\n")
+            # Netascii là ánh xạ 1-1 (LF -> CR LF, CR -> CR NUL) nên round trip
+            # phải trả lại đúng từng byte, kể cả CRLF và CR đơn lẻ.
+            self.assertEqual(Path(target).read_bytes(), payload)
 
     def test_netascii_multi_block_not_truncated(self):
         # Biên block từng rơi đúng giữa cặp CRLF khiến file bị cắt cụt âm thầm.

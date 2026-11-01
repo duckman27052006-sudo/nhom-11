@@ -1,25 +1,27 @@
 # Trivial File Transfer Protocol (TFTP)
 
 Bản cài đặt TFTP hoàn chỉnh theo **RFC 1350** kèm **TFTP Option Extension (RFC 2347)**
-viết bằng Python 3.10+ và **chỉ dùng thư viện chuẩn** (`socket`, `struct`, `threading`,
-`select`, `argparse`, `logging`).
+viết bằng Python 3.10+; **phần lõi chỉ dùng thư viện chuẩn** (`socket`, `struct`,
+`threading`, `select`, `argparse`, `logging`). GUI và cổng web là tuỳ chọn.
 
 | Thành phần | File | Nội dung |
 |---|---|---|
 | Server | `src/tftp_server.py` | Đa luồng, mỗi phiên một TID riêng, hỗ trợ đọc/ghi |
 | Client | `src/tftp_client.py` | Tải về (RRQ) và gửi lên (WRQ), có CLI |
 | GUI | `src/tftp_gui.py`, `src/gui/` | Giao diện PySide6: `theme` (màu), `components` (vẽ bề mặt), `motion` (hiệu ứng), `main_window` (4 trang) |
+| Web gateway | `src/web_upload.py` | Cổng HTTP nhận file từ trình duyệt rồi gửi WRQ (tuỳ chọn, extras `[web]`) |
 | Gói tin | `src/tftp_packet.py` | Đóng gói / giải mã RRQ, WRQ, DATA, ACK, ERROR, OACK |
 | Mã lỗi | `src/tftp_errors.py` | Bảng mã lỗi RFC 1350 + ngoại lệ |
+| Địa chỉ | `src/tftp_net.py` | Phân giải và bind socket cho cả IPv4 lẫn IPv6 |
 | Số liệu | `src/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
-| Test | `tests/` | 130 test (unit + tích hợp + fuzz + soak), tất cả PASS |
+| Test | `tests/` | 166 test (unit + tích hợp + fuzz + soak + web + hồi quy + GUI), tất cả PASS |
 
 ## 1. Cài đặt
 
 Không cần cài thêm gói nào, chỉ cần Python 3.10 trở lên:
 
 ```bash
-cd "Trivial File Transfer Protocol"
+cd nhom-11-main
 python --version
 ```
 
@@ -27,6 +29,12 @@ GUI là **tuỳ chọn**, cần PySide6:
 
 ```bash
 python -m pip install -e ".[gui]"     # hoặc: python -m pip install PySide6
+```
+
+Cổng web upload cũng **tuỳ chọn**, cần Flask + Waitress:
+
+```bash
+python -m pip install -e ".[web]"
 ```
 
 ## 1b. Giao diện đồ hoá (GUI)
@@ -42,7 +50,7 @@ Bố cục chia **4 trang** để không dồn hết chức năng vào một mà
 | **Tổng quan** | Hero đổi theo trạng thái server, lưới số liệu 2×2 cạnh hoạt động gần đây, 2 lối tắt nhanh + liên kết phụ |
 | **Truyền file** | Một hàng **"Đích đến"** dùng chung cho cả hai chiều · Tải về \| Gửi lên · bảng File trên server (bấm hàng để điền ô tải về), banner lỗi + toast |
 | **Máy chủ** | Cấu hình theo khối dọc (lắng nghe, thư mục, 3 giới hạn đều nhau, tùy chọn 2×2) + bảng file (trạng thái trống có nút hành động), bấm đúp để điền vào ô tải về |
-| **Nhật ký** | Luồng gói client trực tiếp (RRQ/WRQ/OACK/DATA/ACK/ERROR), log thời gian thực, lọc mức, lưu log và nút mở Wireshark |
+| **Nhật ký** | Luồng gói client trực tiếp (RRQ/WRQ/OACK/DATA/ACK/ERROR), log thời gian thực, lọc mức, lưu log |
 
 Chi tiết ngôn ngữ thiết kế xem `GUI_REDESIGN.md`.
 
@@ -52,14 +60,38 @@ Hiệu ứng (tất cả nằm gọn trong `src/gui/motion.py`): chuyển trang 
 dưới lên, cửa sổ mờ dần khi mở, chấm trạng thái nhịp thở, thanh tiến trình
 shimmer khi chưa rõ tổng, ô số liệu đếm tăng dần, toast góc phải dưới.
 
-> **Về màu sắc:** GUI **không dùng stylesheet (QSS)**. Trên Qt 6.12 + Windows,
-> `setStyleSheet` chỉ áp được cho một phần cây widget và không ổn định giữa các
-> lần chạy. Thay vào đó: widget do hệ điều hành vẽ lấy màu từ `QPalette`
-> (`theme.build_palette`), còn bề mặt thương hiệu (card, ô, nút, pill, thanh tiến
-> trình) tự vẽ bằng `QPainter`. Nhờ vậy cả hai theme sáng/tối đều hiển thị đúng.
+> **Về màu sắc:** bề mặt thương hiệu (card, ô, nút, pill, thanh tiến trình) tự
+> vẽ bằng `QPainter` chứ không dùng QSS, vì trên Qt 6.12 + Windows
+> `setStyleSheet` chỉ áp được cho một phần cây widget. Widget do hệ điều hành vẽ
+> lấy màu từ `QPalette` (`theme.build_palette`). QSS chỉ còn dùng cho **màu chữ**
+> của một số nhãn; các nhãn đó ghi token vào property `tokenColor` để
+> `_restyle_token_labels()` vẽ lại khi đổi theme. Nhờ vậy cả hai theme sáng/tối
+> đều hiển thị đúng.
 
 > Server và client chạy ở thread riêng, nên giao diện không bao giờ treo khi đang
 > truyền file. Mã lõi (`src/tftp_*.py`) không phụ thuộc PySide6.
+
+## 1c. Cổng web upload (tuỳ chọn)
+
+Người dùng trong LAN có thể gửi file bằng trình duyệt mà không cần cài client
+TFTP. Trình duyệt gửi HTTP multipart tới cổng; cổng ghi file tạm rồi gửi WRQ tới
+TFTP server, nên file cuối cùng nằm trong thư mục gốc của TFTP server.
+
+```bash
+python -m pip install -e ".[web]"
+python -m src.web_upload \
+  --host 192.168.1.10 --port 8080 \
+  --allowed-network 192.168.1.0/24 \
+  --tftp-server 127.0.0.1:6969
+```
+
+Cổng chỉ bind vào một địa chỉ private/loopback cụ thể (mặc định `127.0.0.1`),
+bắt buộc ít nhất một `--allowed-network`, kiểm tra peer IP thật + `Origin` + CSRF
+token, giới hạn dung lượng và thêm CSP/security headers. Không có route liệt kê
+hay tải file. IPv6 cũng dùng được, ví dụ `--host fd12:3456:789a::10
+--allowed-network fd12:3456:789a::/64 --tftp-server "[::1]:6969"`.
+
+Chi tiết và giới hạn bảo mật: [`docs/web-upload.md`](docs/web-upload.md).
 
 ## 2. Chạy thử nhanh (2 cửa sổ terminal)
 
@@ -115,7 +147,7 @@ python -m src.tftp_gui
 | `--root` | `files` | thư mục gốc phục vụ / lưu file |
 | `--timeout` | `5` | giây chờ mỗi gói tin |
 | `--retries` | `5` | số lần gửi lại tối đa |
-| `--blksize` | `1468` | kích thước khối mặc định khi không thương lượng được |
+| `--blksize` | `1468` | blksize server đề nghị khi client yêu cầu ngoài khoảng 8..65464 |
 | `--no-overwrite` | tắt | từ chối ghi đè (trả ERROR 6) |
 | `--no-options` | tắt | tắt thương lượng option RFC 2347 |
 | `--max-clients` | `32` | số phiên đồng thời tối đa |
@@ -124,7 +156,7 @@ python -m src.tftp_gui
 | `--max-requests-per-second` | `100` | giới hạn request/s chống flood |
 | `--stats-interval` | `0` (tắt) | in bảng số liệu vận hành mỗi N giây |
 | `--stats-json` | — | ghi số liệu vận hành ra file JSON khi dừng |
-| `--log-file` | — | ghi log ra file |
+| `--log-file` | — | ghi thêm log ra file (vẫn in ra console) |
 | `--version` | | in version rồi thoát |
 | `-v` | | log từng gói tin |
 
@@ -148,7 +180,7 @@ python -m src.tftp_gui
 | `--no-options` | tắt | giao thức thuần RFC 1350, blksize cố định 512 |
 | `--stats` | tắt | in số liệu vận hành (metrics) khi kết thúc |
 | `--stats-json` | — | ghi số liệu vận hành ra file JSON |
-| `--log-file` | — | ghi log ra file |
+| `--log-file` | — | ghi thêm log ra file (vẫn in ra console) |
 | `--version` | | in version rồi thoát |
 | `-v` | | log từng gói tin |
 
@@ -178,12 +210,15 @@ server.shutdown()
 ## 6. Chạy test
 
 ```bash
-python -m unittest discover -v          # toàn bộ: unit + tích hợp + fuzz + soak
+python -m unittest discover -v          # toàn bộ: unit + tích hợp + fuzz + soak + web + hồi quy
 python -m unittest tests.test_packet -v  # chỉ unit test gói tin
 python -m unittest tests.test_e2e -v     # chỉ test tích hợp
 python -m unittest tests.test_fuzz -v    # chỉ malformed packet + fuzz
 python -m unittest tests.test_soak -v    # chỉ soak / stress
 python -m unittest tests.test_metrics -v # chỉ registry metrics
+python -m unittest tests.test_web_upload -v  # cổng web (cần extras [web])
+python -m unittest tests.test_regressions -v  # hồi quy RFC/netascii/CLI
+python -m unittest tests.test_gui_smoke -v   # smoke GUI (cần extras [gui], offscreen)
 
 ruff check .                             # lint
 ```
@@ -201,7 +236,7 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 6 | ghi đè bị chặn | ERROR code 6 khi `--no-overwrite` |
 | 7 | mất ACK | client gửi lại đúng ACK cũ, truyền vẫn hoàn tất |
 | 8 | nhiều client song song | 8 client cùng lúc, không lẫn dữ liệu |
-| 9 | netascii | CRLF ↔ LF đúng quy cách |
+| 9 | netascii | `LF → CR LF`, `CR → CR NUL`; round trip đúng từng byte, kể cả CR đơn lẻ |
 | 10 | path traversal | `../secret.txt` bị từ chối (ERROR 2) |
 | 11 | RRQ lặp lại | server trả lời lại từ **cùng TID** |
 | 12 | gói tin hỏng | opcode lạ / datagram rỗng → ERROR 4, không tạo phiên |
@@ -219,6 +254,9 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 24 | soak mất gói | proxy UDP bỏ 20% gói, truyền vẫn hoàn tất nhờ retransmission |
 | 25 | soak rò rỉ | nhiều chu kỳ liên tiếp: không sót phiên, file `.part`, thread |
 | 26 | metrics | counter/gauge/timer đầy đủ, `render()`/JSON đúng |
+| 27 | web gateway | upload qua HTTP multipart → TFTP, ACL mạng, CSRF, Origin, giới hạn dung lượng |
+| 28 | hồi quy | option quá dài, OACK thiếu `blksize`, `tsize` echo, netascii CR NUL, CLI validation |
+| 29 | GUI smoke | offscreen: đổi theme, lọc log theo mức, bind lỗi vẫn khởi động lại được |
 
 Soak test nặng hơn bằng biến môi trường:
 
@@ -242,22 +280,17 @@ Mỗi bên đo: số phiên (bắt đầu / hoàn tất / timeout), số gói ti
 
 ## 8. Kiểm tra bằng Wireshark
 
-Trong GUI, mở trang **Nhật ký** rồi bấm **Mở Wireshark**. Nếu tìm thấy
-`dumpcap.exe` và Npcap Loopback Adapter, GUI tự bắt đầu capture UDP trên loopback,
-cấu hình Decode As cho cổng server và lọc hiển thị `udp && ip.addr == 127.0.0.1`.
-Nhờ đó gói SSDP/multicast từ thiết bị LAN không làm nhiễu danh sách, trong khi
-DATA/ACK qua TID tạm vẫn hiện kể cả khi Wireshark chưa nhận dạng là TFTP. Một số
-gói có thể mang nhãn UDP; nhấp phải gói rồi chọn **Follow → UDP Stream** để xem
-trao đổi. Nếu không tìm thấy adapter, chọn Npcap Loopback Adapter trong Wireshark,
-dùng display filter trên và bấm Start. Bắt gói trước khi truyền file. Luồng gói
-trong GUI là trace phía client; Wireshark cho thấy datagram thật trên mạng.
+Trang **Nhật ký** trong GUI hiển thị log trực tiếp của client/server (kể cả từng
+gói tin ở mức DEBUG). Wireshark cho thấy datagram thật trên dây — bắt gói **trước**
+khi truyền file rồi đối chiếu hai bên.
 
 Trên Windows, dùng adapter **Npcap Loopback Adapter** khi client/server cùng máy.
 Không đặt capture filter `udp port 6969`: sau RRQ/WRQ, TFTP chuyển sang TID dùng
 port UDP tạm. Dùng capture filter `udp and host 127.0.0.1` và display filter
 `udp && ip.addr == 127.0.0.1`; không dùng display filter `tftp` đơn lẻ vì một số
 Wireshark không giải mã DATA/ACK trên TID tạm. Nếu cần, chọn gói đầu tiên đến
-port 6969 → chuột phải → **Decode As…** → TFTP.
+port 6969 → chuột phải → **Decode As…** → TFTP. Một số gói có thể mang nhãn UDP;
+nhấp phải gói rồi chọn **Follow → UDP Stream** để xem trao đổi.
 
 ```bash
 tshark -i any -f "udp and host 127.0.0.1" -Y "udp && ip.addr == 127.0.0.1" -V
@@ -269,20 +302,25 @@ Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 �
 
 - Lock-step: mỗi khối chờ ACK trước khi gửi khối kế tiếp.
 - Timeout + retransmission với giới hạn số lần thử.
+- Hỗ trợ **IPv4 và IPv6** cho cả server lẫn client (`src/tftp_net.py`); `--host ::1`,
+  `--server [::1]:6969` đều dùng được.
+- Cổng **web upload** tuỳ chọn: HTTP multipart → TFTP WRQ, ACL theo peer IP,
+  CSRF + Origin, CSP, giới hạn dung lượng (`src/web_upload.py`).
+- `--log-file` ghi thêm ra file chứ không thay log console.
 - TID riêng cho từng phiên, kiểm tra nguồn gói để chống lẫn dữ liệu giữa các client.
 - So khớp `(addr, filename, mode, options)` để phát hiện OS cấp lại cùng port
   cho client mới (không replay nhầm phiên cũ).
 - Block number 16 bit wrap về 0 sau 65535 (`(block+1) & 0xFFFF`), truyền được
   file >32 MB với blksize 512.
 - `blksize` (8..65464), `timeout` (1..255), `tsize` + gói OACK (RFC 2347).
-  RRQ gửi `tsize=0` để hỏi kích thước, WRQ gửi `tsize=<size thật>` để server
-  kiểm tra `--max-file-size` trước khi nhận.
+  RRQ gửi `tsize=0` để hỏi kích thước, WRQ gửi `tsize=<size thật>` (server echo
+  lại trong OACK) để kiểm tra `--max-file-size` trước khi nhận.
 - Chống "Sorcerer's Apprentice Syndrome": chỉ gửi lại đúng gói đang chờ, có ngân sách gói rác.
 - Chặn path traversal, ký tự điều khiển, `<>:"|?*`, tên réserved Windows;
   ghi file tạm rồi `os.replace` để không để lại file dở dang.
 - Lock theo tên file khi WRQ: 2 upload cùng tên thì 1 bên nhận ERROR 6.
 - Chế độ `octet` và `netascii` (netascii luôn chia chunk **đúng blksize** trừ block cuối,
-  và decoder tự nối cặp CRLF bị tách qua 2 block — không bao giờ cắt cụt file).
+  decoder tự nối cặp `CR LF`/`CR NUL` bị tách qua 2 block — không bao giờ cắt cụt file).
 - File rỗng, file đúng bằng bội số blksize, file nhiều MB.
 - Siết parser: option lặp, giá trị option không phải số thuần, OACK rác,
   ERROR thiếu byte 0, DATA vượt blksize — đều bị từ chối bằng ERROR chuẩn.

@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from typing import Any
 
 MAX_SAMPLES = 4096
-"""Trần số mẫu giữ lại cho mỗi timer trước khi thưa dần."""
+"""Số mẫu mục tiêu cho mỗi timer; khi đạt gấp đôi thì thưa dần về ~MAX_SAMPLES."""
 
 PERCENTILES = (50, 95, 99)
 
@@ -63,8 +63,13 @@ class Timer:
         samples = self._samples
         samples.append(value)
         # Thưa dần khi đạt 2x trần: giữ ~MAX_SAMPLES mẫu đều nhất, bỏ đi một nửa.
+        # Mẫu lớn nhất (spike) luôn được giữ lại: nếu rơi vào vị trí bị bỏ thì
+        # thay phần tử cuối bằng nó, nếu không p95/p99 sẽ báo thấp hơn thực tế.
         if len(samples) >= MAX_SAMPLES * 2:
-            self._samples = samples[::2]
+            thinned = samples[::2]
+            if self.maximum not in thinned:
+                thinned[-1] = self.maximum
+            self._samples = thinned
 
     def percentile(self, percent: float) -> float:
         """Phân vị theo phương pháp nearest-rank (0 nếu chưa có mẫu nào)."""

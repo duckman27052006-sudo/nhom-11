@@ -14,6 +14,7 @@ Chạy server::
 from __future__ import annotations
 
 import argparse
+import errno
 import logging
 import os
 import select
@@ -26,11 +27,13 @@ from collections import deque
 
 from . import DEFAULT_PORT, enable_utf8_console, tftp_errors
 from .tftp_metrics import Metrics
+from .tftp_net import Addr, resolve_bind, session_bind_host
 from .tftp_packet import (
     ACK,
     DATA,
     DEFAULT_BLKSIZE,
     DEFAULT_TIMEOUT,
+    ERROR,
     MAX_BLKSIZE,
     MAX_DATAGRAM,
     MAX_STALE_PACKETS,
@@ -38,9 +41,6 @@ from .tftp_packet import (
     OACK,
     OP_ACK,
     OP_DATA,
-    OP_ERROR,
-    OP_RRQ,
-    OP_WRQ,
     OPCODE_NAMES,
     OPTION_BLKSIZE,
     OPTION_NAMES,
@@ -71,11 +71,20 @@ MIN_SESSION_TIMEOUT = 0.05
 __all__ = ["TftpServer", "Session", "MAX_STALE_PACKETS"]
 
 
+def _io_error_code(exc: OSError) -> int:
+    """Chọn mã ERROR RFC 1350 theo errno thay vì luôn báo "disk full"."""
+    if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+        return tftp_errors.ERR_DISK_FULL
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        return tftp_errors.ERR_ACCESS_VIOLATION
+    return tftp_errors.ERR_NOT_DEFINED
+
+
 class Session(threading.Thread):
     """Một phiên truyền file: thread riêng + socket riêng (TID riêng)."""
 
     def __init__(
-        self, server: TftpServer, client_addr: tuple[str, int], request: RRQ | WRQ
+        self, server: TftpServer, client_addr: Addr, request: RRQ | WRQ
     ) -> None:
         super().__init__(name=f"tftp-{client_addr[0]}:{client_addr[1]}", daemon=True)
         self.server = server
@@ -95,8 +104,12 @@ class Session(threading.Thread):
         self._first_packet_at: float | None = None
         try:
             self._notify_r, self._notify_w = socket.socketpair()
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sock.bind((server.host if server.host != "0.0.0.0" else "", 0))
+            # Không chặn: replay() được gọi khi đang giữ self._lock của server,
+            # nếu buffer socketpair đầy thì send() sẽ chặn cả server.
+            self._notify_w.setblocking(False)
+            self.sock = socket.socket(server.family, socket.SOCK_DGRAM)
+            bind_host = session_bind_host(server.host, server.family)
+            self.sock.bind((bind_host, 0))
             self.local_port = self.sock.getsockname()[1]
         except Exception:
             for sock in (self.sock, self._notify_r, self._notify_w):
@@ -259,7 +272,9 @@ class Session(threading.Thread):
                 return SESSION_TIMEOUT
             if source != self.client_addr:
                 self.metrics.incr("packets.foreign_tid")
-                self.log.warning("bỏ qua gói từ TID không xác định %s:%s", *source)
+                self.log.warning(
+                    "bỏ qua gói từ TID không xác định %s:%s", source[0], source[1]
+                )
                 continue
             self.metrics.incr("packets.received")
             self.metrics.incr("bytes.received", len(raw))
@@ -270,7 +285,7 @@ class Session(threading.Thread):
                 self._send_error(exc.code, str(exc))
                 continue
             self.log.debug("<- %s", describe(packet))
-            if packet.OPCODE == OP_ERROR:
+            if isinstance(packet, ERROR):
                 raise tftp_errors.TftpRemoteError(packet.code, packet.message)
             if packet.OPCODE not in accept_ops:
                 waiting = "/".join(describe_of(op) for op in accept_ops)
@@ -358,7 +373,8 @@ class Session(threading.Thread):
 
     # -------------------------------------------------------------- RRQ: server gửi ---
     def _serve_read(self) -> None:
-        request: RRQ = self.request
+        assert isinstance(self.request, RRQ)
+        request = self.request
         path = self.server.resolve_path(request.filename)
         if path is None:
             self.metrics.incr("requests.bad_filename")
@@ -377,14 +393,14 @@ class Session(threading.Thread):
             )
             return
         except OSError as exc:
-            self._send_error(tftp_errors.ERR_NOT_DEFINED, str(exc))
+            self._send_error(_io_error_code(exc), str(exc))
             return
 
         with handle:
             try:
                 total = os.fstat(handle.fileno()).st_size
             except OSError as exc:
-                self._send_error(tftp_errors.ERR_NOT_DEFINED, str(exc))
+                self._send_error(_io_error_code(exc), str(exc))
                 return
             self.log.info(
                 "bắt đầu gửi '%s' (%d byte) cho %s:%s",
@@ -438,7 +454,6 @@ class Session(threading.Thread):
                         continue
                     if pending_final:
                         elapsed = max(time.monotonic() - started, 1e-6)
-                        self.metrics.incr("payload.sent", total)
                         self.metrics.incr("transfers.completed.RRQ")
                         self.log.info(
                             "gửi xong '%s' (%d byte) cho %s:%s",
@@ -476,7 +491,8 @@ class Session(threading.Thread):
 
     # -------------------------------------------------------------- WRQ: server nhận ---
     def _serve_write(self) -> None:
-        request: WRQ = self.request
+        assert isinstance(self.request, WRQ)
+        request = self.request
         path = self.server.resolve_path(request.filename)
         if path is None:
             self.metrics.incr("requests.bad_filename")
@@ -490,7 +506,6 @@ class Session(threading.Thread):
         # 2.4: chống 2 WRQ đồng thời cùng tên (last-write-wins trong im lặng).
         if not self.server.try_acquire_write(path):
             self.metrics.incr("requests.locked")
-            self.metrics.add_gauge("writes.active", -1)
             self._send_error(
                 tftp_errors.ERR_FILE_EXISTS,
                 f"file '{request.filename}' đang được ghi bởi phiên khác",
@@ -501,7 +516,6 @@ class Session(threading.Thread):
         try:
             directory = os.path.dirname(path) or "."
             if not os.path.isdir(directory):
-                self.metrics.add_gauge("writes.active", -1)
                 self._send_error(tftp_errors.ERR_ACCESS_VIOLATION, "thư mục đích không tồn tại")
                 return
 
@@ -517,16 +531,16 @@ class Session(threading.Thread):
                 and self.server.max_file_size is not None
                 and offered_size > self.server.max_file_size
             ):
+                self.metrics.incr("requests.oversized")
                 self._send_error(
                     tftp_errors.ERR_DISK_FULL,
                     f"file {offered_size} byte vượt giới hạn {self.server.max_file_size} byte",
                 )
                 return
 
-            self.metrics.incr("requests.oversized")
             temp_path = f"{path}.tftp-{os.getpid()}-{self.local_port}.part"
             try:
-                accepted = self._negotiate(request.options, None)
+                accepted = self._negotiate(request.options, offered_size)
             except tftp_errors.TftpError as exc:
                 self._send_error(exc.code, str(exc))
                 return
@@ -536,7 +550,7 @@ class Session(threading.Thread):
                 self._send_error(tftp_errors.ERR_ACCESS_VIOLATION, "không có quyền ghi")
                 return
             except OSError as exc:
-                self._send_error(tftp_errors.ERR_DISK_FULL, str(exc))
+                self._send_error(_io_error_code(exc), str(exc))
                 return
 
             received = 0
@@ -579,7 +593,7 @@ class Session(threading.Thread):
                                 f"DATA {wire_len} byte vượt quá blksize {self.blksize}",
                             )
                             return
-                        # Decoder giữ nối cặp CRLF bị tách giữa 2 DATA block.
+                        # Decoder giữ nối cặp CR LF / CR NUL bị tách giữa 2 DATA block.
                         payload = (
                             decoder.feed(data_packet.data)
                             if decoder is not None
@@ -588,7 +602,9 @@ class Session(threading.Thread):
                         try:
                             handle.write(payload)
                         except OSError as exc:
-                            self._send_error(tftp_errors.ERR_DISK_FULL, f"ghi file thất bại: {exc}")
+                            self._send_error(
+                                _io_error_code(exc), f"ghi file thất bại: {exc}"
+                            )
                             return
                         received += len(payload)
                         if (
@@ -622,17 +638,22 @@ class Session(threading.Thread):
                             break
                         expect_block = next_block(data_packet.block)
 
-                if decoder is not None:
-                    tail = decoder.flush()
-                    if tail:
-                        handle.write(tail)
-                        received += len(tail)
+                    # Flush netascii phải nằm TRONG `with handle:` — ghi sau khi
+                    # file đã đóng sẽ ném ValueError và giết thread phiên.
+                    if decoder is not None:
+                        tail = decoder.flush()
+                        if tail:
+                            handle.write(tail)
+                            received += len(tail)
 
                 try:
                     os.replace(temp_path, path)
                 except OSError as exc:
-                    self._send_error(tftp_errors.ERR_DISK_FULL, f"không lưu được file: {exc}")
-                    raise tftp_errors.TftpDiskFull(f"không lưu được file: {exc}") from exc
+                    code = _io_error_code(exc)
+                    self._send_error(code, f"không lưu được file: {exc}")
+                    raise tftp_errors.TftpError(
+                        f"không lưu được file: {exc}", code=code
+                    ) from exc
                 elapsed = max(time.monotonic() - started, 1e-6)
                 self.metrics.incr("payload.received", received)
                 self.metrics.incr("transfers.completed.WRQ")
@@ -705,10 +726,11 @@ class TftpServer:
         self.metrics = metrics if metrics is not None else Metrics("tftp.server")
         self.stats_interval = max(0.0, stats_interval)
         self._last_stats = time.monotonic()
-        self._sessions: dict[tuple[str, int], Session] = {}
+        self._sessions: dict[Addr, Session] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.sock: socket.socket | None = None
+        self.family: int = socket.AF_INET
         self.bound_port = port
         self._active_writes: set[str] = set()
         self._request_times: deque[float] = deque()
@@ -839,11 +861,13 @@ class TftpServer:
 
     # -------------------------------------------------------------------- chạy ---
     def serve_forever(self) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        family, bind_addr = resolve_bind(self.host, self.port)
+        sock = socket.socket(family, socket.SOCK_DGRAM)
         self.sock = sock
+        self.family = family
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.settimeout(0.5)
-        sock.bind((self.host, self.port))
+        sock.bind(bind_addr)
         self.bound_port = sock.getsockname()[1]
         self.log.info(
             "TFTP server sẵn sàng: udp://%s:%d, thư mục gốc=%s, blksize=%d, "
@@ -887,7 +911,7 @@ class TftpServer:
         self._last_stats = now
         self.log.info("thống kê:\n%s", self.metrics.render())
 
-    def _handle_datagram(self, raw: bytes, addr: tuple[str, int]) -> None:
+    def _handle_datagram(self, raw: bytes, addr: Addr) -> None:
         if self._stop.is_set():
             return
         self.metrics.incr("datagrams.received")
@@ -899,7 +923,7 @@ class TftpServer:
             self._send_error_from_well_known(addr, exc.code, str(exc))
             return
 
-        if packet.OPCODE not in (OP_RRQ, OP_WRQ):
+        if not isinstance(packet, (RRQ, WRQ)):
             # Gói DATA/ACK/OACK tới well-known port = TID lạ (RFC 1350 §4.2).
             self.metrics.incr("packets.unknown_tid")
             self.log.warning("%s không hợp lệ từ %s", describe(packet), addr)
@@ -933,10 +957,9 @@ class TftpServer:
                 # OS cấp lại ephemeral port cho client mới. Không được replay
                 # phiên cũ (sẽ trộn dữ liệu + rò rỉ .part). Đóng phiên cũ,
                 # mở phiên mới cho request này.
-                    self.metrics.incr("requests.port_reuse")
-                    self.log.warning(
-                        "port %s tái sử dụng cho file khác ('%s' != '%s'): "
-
+                self.metrics.incr("requests.port_reuse")
+                self.log.warning(
+                    "port %s tái sử dụng cho file khác ('%s' != '%s'): "
                     "đóng phiên cũ TID %s, mở phiên mới",
                     addr,
                     packet.filename,
@@ -972,9 +995,20 @@ class TftpServer:
                 )
                 return
             self._sessions[addr] = new_session
-        new_session.start()
+        try:
+            new_session.start()
+        except RuntimeError as exc:
+            # Không tạo được thread: dọn phiên khỏi map để không chiếm slot
+            # max_clients và không rò rỉ 3 socket của Session.
+            with self._lock:
+                self._sessions.pop(addr, None)
+            new_session.close()
+            self.log.warning("không chạy được thread cho %s: %s", addr, exc)
+            self._send_error_from_well_known(
+                addr, tftp_errors.ERR_NOT_DEFINED, f"không tạo được phiên: {exc}"
+            )
 
-    def _send_error_from_well_known(self, addr: tuple[str, int], code: int, message: str) -> None:
+    def _send_error_from_well_known(self, addr: Addr, code: int, message: str) -> None:
         self.metrics.incr(f"errors.sent.{code}")
         if self.sock is None:
             return
@@ -982,6 +1016,21 @@ class TftpServer:
             self.sock.sendto(make_error(code, message), addr)
         except OSError:
             pass
+
+    def request_stop(self) -> None:
+        """Đánh thức vòng lặp để dừng server — an toàn khi gọi từ signal handler.
+
+        Không lấy `self._lock` và không join thread: `shutdown()` làm việc đó,
+        và nếu signal handler chen vào đúng lúc main thread đang giữ lock thì
+        `threading.Lock` (không reentrant) sẽ deadlock vĩnh viễn.
+        """
+        self._stop.set()
+        sock, self.sock = self.sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def shutdown(self) -> None:
         """Dừng server: gửi ERROR cho client, đóng phiên, đợi thread (3.1)."""
@@ -1036,7 +1085,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--blksize",
         type=int,
         default=DEFAULT_SERVER_BLKSIZE,
-        help="kích thước khối mặc định",
+        help="blksize server đề nghị khi client yêu cầu ngoài khoảng 8..65464",
     )
     parser.add_argument(
         "--no-overwrite",
@@ -1082,7 +1131,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     enable_utf8_console()
     args = build_arg_parser().parse_args(argv)
-    handlers: list[logging.Handler] = []
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.log_file:
         try:
             handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
@@ -1093,7 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
-        handlers=handlers or None,
+        handlers=handlers,
     )
     server = TftpServer(
         args.host,
@@ -1113,7 +1162,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def _on_term(signum, _frame) -> None:
         LOG.info("đã nhận tín hiệu %s, đang dừng...", signum)
-        server.shutdown()
+        # Chỉ set cờ + đóng socket; shutdown() (lấy lock, join thread) chạy
+        # trong finally của serve_forever để tránh deadlock trong signal handler.
+        server.request_stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

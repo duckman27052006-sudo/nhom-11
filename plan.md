@@ -110,7 +110,7 @@ Lý do chọn Python: socket API đơn giản, đóng gói/giải mã gói tin n
 ## 7. Cấu Trúc Thư Mục Dự Án
 
 ```
-Trivial File Transfer Protocol/
+Trivial File Transfer Protocol/   (repo: nhom-11-main)
 ├── plan.md
 ├── README.md
 ├── src/

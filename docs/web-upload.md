@@ -46,10 +46,10 @@ trên nhánh `main`. Bật GitHub Pages cho repository với nguồn **GitHub Ac
 Trang Pages công khai; không đưa thông tin bí mật hoặc file người dùng lên đó.
 
 TFTP server là nơi thực thi quyền ghi đè, giới hạn dung lượng, quota, dung lượng
-đĩa và lưu file. Bật `--overwrite` trên TFTP server nếu muốn cho phép ghi đè;
-mặc định file trùng tên bị từ chối. TFTP server ghi log phiên WRQ từ máy gateway.
-Web log giữ địa chỉ IP trình duyệt để đối chiếu; TFTP server sẽ thấy địa chỉ
-mạng của máy chạy gateway, không phải IP trình duyệt.
+đĩa và lưu file. Mặc định TFTP server **cho phép** ghi đè; thêm `--no-overwrite`
+nếu muốn file trùng tên bị từ chối (ERROR 6). TFTP server ghi log phiên WRQ từ
+máy gateway. Web log giữ địa chỉ IP trình duyệt để đối chiếu; TFTP server sẽ thấy
+địa chỉ mạng của máy chạy gateway, không phải IP trình duyệt.
 
 Mặc định app chỉ bind `127.0.0.1`, nên không truy cập được từ máy khác. Đây là
 chủ ý fail-closed. `--host` bắt buộc là IP private/loopback cụ thể; wildcard
@@ -69,8 +69,22 @@ python -m src.web_upload `
 Waitress chỉ bind family của địa chỉ host đã chỉ định. Muốn phục vụ cả IPv4 và
 IPv6 thì chạy hai instance riêng, mỗi instance có địa chỉ và subnet allowlist
 riêng, hoặc đặt reverse proxy nội bộ có cấu hình ACL đúng. Không dùng proxy
-header để giả địa chỉ client: ACL dựa trên peer IP thực. TFTP server cũng phải
-lắng nghe trên IPv6 để nhận kết nối tại `[::1]:6969`.
+header để giả địa chỉ client: ACL dựa trên peer IP thực. TFTP server cũng lắng
+nghe được trên IPv6 (`python -m src.tftp_server --host ::1`) nên nhận được WRQ
+tại `[::1]:6969`.
+
+## Tham số
+
+| Tham số | Mặc định | Ý nghĩa |
+|---|---|---|
+| `--host` | `127.0.0.1` | IP private/loopback cụ thể để bind (không nhận hostname/wildcard/IP public) |
+| `--port` | `8080` | cổng HTTP |
+| `--allowed-network` | — (bắt buộc) | CIDR private/loopback được phép upload; truyền nhiều lần được |
+| `--tftp-server` | `127.0.0.1:6969` | `host[:port]`, IPv6 dạng `[::1]:6969` |
+| `--max-file-size` | `100` | giới hạn mỗi file, đơn vị **MiB** |
+| `--tftp-blocksize` | `1468` | blksize dùng khi gửi WRQ |
+| `--tftp-timeout` / `--tftp-retries` | `5` / `5` | timeout và số lần thử lại TFTP |
+| `--threads` | `4` | số thread của Waitress |
 
 ## Giới hạn và chính sách file
 
@@ -111,3 +125,7 @@ tảng trong `docs/deployment.md`.
 ```powershell
 python -m unittest tests.test_web_upload -v
 ```
+
+Test dựng TFTP server thật trên port ngẫu nhiên rồi upload qua Flask test client;
+các ca bảo mật (CSRF, ACL, Origin, giới hạn dung lượng, tên file) chạy không cần
+mạng ngoài.

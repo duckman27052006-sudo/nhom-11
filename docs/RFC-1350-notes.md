@@ -86,14 +86,15 @@ Server đồng ý:        | 00 06 blksize 00 1468 00 timeout 00 3 00 |          
   giá trị mặc định của server (`--blksize`, mặc định 1468).
 - `timeout`: 1..255 (giây).
 - `tsize`: client RRQ gửi `tsize=0` để hỏi, server RRQ trả về kích thước file
-  thật; client WRQ gửi `tsize=<kích thước thật>`, server WRQ trả `tsize=0`
-  và dùng giá trị client gửi để kiểm tra `--max-file-size` trước khi nhận.
+  thật; client WRQ gửi `tsize=<kích thước thật>`, server WRQ **echo lại đúng giá
+  trị đó** trong OACK (RFC 2349) và dùng nó để kiểm tra `--max-file-size` trước
+  khi nhận.
 - Block number chỉ 16 bit: `(block+1) & 0xFFFF`, wrap 65535 → 0 → 1...
-- netascii: mỗi DATA trên dây **đúng bằng** blksize đã thương lượng, trừ block cuối
-  (`NetasciiReader`). LF -> CRLF làm dữ liệu dài ra nên phải convert *trước* rồi mới cắt
-  khối; đọc `blksize` byte thô rồi convert sẽ sinh khối gấp đôi và sai phát hiện
-  block cuối. Vì buộc phải đầy khối, biên khối đôi khi rơi đúng giữa cặp CRLF — phía
-  nhận phải ghép lại bằng `NetasciiDecoder` (giữ 1 byte `\r` qua block kế tiếp).
+- netascii theo RFC 1350 §4.1: `LF → CR LF`, `CR → CR NUL` (không phải `CR → CR LF`).
+  Mỗi DATA trên dây **đúng bằng** blksize đã thương lượng, trừ block cuối
+  (`NetasciiReader`). Vì buộc phải đầy khối, biên khối có thể rơi đúng giữa cặp
+  `CR LF` hoặc `CR NUL` — phía nhận ghép lại bằng `NetasciiDecoder` (giữ 1 byte
+  `\r` qua block kế tiếp rồi quyết định theo byte đầu của block sau).
 - `errmsg` dùng UTF-8 (superset của ASCII) để giữ tiếng Việt.
 - Option **không được** server chấp nhận thì bị bỏ qua; nếu không còn option nào
   được chấp nhận thì server **không gửi OACK** mà đi thẳng vào luồng DATA/ACK.
@@ -109,7 +110,7 @@ Server đồng ý:        | 00 06 blksize 00 1468 00 timeout 00 3 00 |          
 | Giá trị option phải là **chuỗi toàn số ASCII** | `int()` của Python nhận cả `"+8"`, `" 8 "`, `"-8"`, chữ số fullwidth — vô nghĩa với RFC 2347 | `_parse_option_int` |
 | `timeout` luôn ép về **1..255** | `int(0.4)` = 0; `select(..., 0)` không chờ nên server quay vòng gửi lại và nuốt ACK | `clamp_timeout` |
 | OACK có option đã biết mà giá trị không phải số → ERROR 4 | OACK rác phải bị chặn ngay, không đẩy lỗi xuống tầng thương lượng | `unpack` |
-| Option lạ (không thuộc RFC 2347) vẫn bị bỏ qua, **không** ghi khi `pack` | giữ nguyên hành vi "bỏ qua option không hỗ trợ" | `_encode_options` |
+| Option lạ (không thuộc RFC 2347) được giữ nguyên khi `pack` | bên nhận bỏ qua option không hỗ trợ; sửa gói sẽ phá bất biến `unpack → pack → unpack` | `_encode_options` |
 
 Giá trị option được giải mã/đóng gói bằng **latin-1** (ánh xạ 1 byte ↔ 1 code
 point) nên `unpack` → `pack` → `unpack` giữ nguyên byte kể cả với option lạ.
@@ -138,6 +139,7 @@ dùng `_exchange(..., send=False)` để chờ DATA 1.
 | 5 | Unknown transfer ID | gói tới TID không tồn tại |
 | 6 | File already exists | ghi đè khi server cấu hình `--no-overwrite` |
 | 7 | No such user | (không dùng, RFC để dành cho xác thực) |
+| 8 | Option negotiation failed | RFC 2347; hằng số có sẵn (`ERR_OPTION_NEGOTIATION`) |
 
 ## 8. Bảo mật tối thiểu
 

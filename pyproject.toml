@@ -9,12 +9,15 @@ dependencies = []
 [project.optional-dependencies]
 # GUI là tuỳ chọn: lõi server/client vẫn chỉ dùng thư viện chuẩn.
 gui = ["PySide6>=6.5"]
+# Cổng web upload cũng tuỳ chọn (Flask + Waitress), xem docs/web-upload.md.
+web = ["flask>=3.0", "waitress>=3.0"]
 dev = ["ruff>=0.5", "mypy>=1.5"]
 
 [project.scripts]
 tftp-server = "src.tftp_server:main"
 tftp-client = "src.tftp_client:main"
 tftp-gui = "src.tftp_gui:main"
+tftp-web-upload = "src.web_upload:main"
 
 [build-system]
 requires = ["setuptools>=61"]

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
 except ImportError:  # pragma: no cover - thiếu extras [gui]
     raise unittest.SkipTest("cần PySide6 cho smoke test GUI") from None
 
@@ -77,6 +78,33 @@ class TestGuiSmoke(unittest.TestCase):
         self.window.log_filter.setCurrentIndex(0)
         pump(self.app)
         self.assertEqual(self._visible_blocks(), all_visible)
+
+    def test_download_success_enables_open_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "done.bin")
+            Path(path).write_bytes(b"x")
+            self.assertFalse(self.window.download_open.isEnabled())
+            self.window._on_download_ok(path)
+            pump(self.app)
+            self.assertTrue(self.window.download_open.isEnabled())
+            self.assertEqual(self.window._last_download_path, path)
+
+    def test_copy_log_reports_success(self) -> None:
+        self.window._on_log("INFO", "22:00:00 INFO    xin chao")
+        pump(self.app)
+        self.window._copy_log()
+        pump(self.app)
+        self.assertIn("Đã sao chép", self.window.status_bar.message.text())
+
+    def test_shortcuts_dialog_lists_bindings(self) -> None:
+        dialog = self.window._build_shortcuts_dialog()
+        try:
+            self.assertEqual(dialog.windowTitle(), "Phím tắt")
+            texts = [label.text() for label in dialog.findChildren(QLabel)]
+            self.assertIn("Ctrl+L", texts)
+            self.assertIn("Ctrl+1 … Ctrl+4", texts)
+        finally:
+            dialog.close()
 
     def test_bind_failure_leaves_gui_retryable(self) -> None:
         self.window.host_edit.setText("203.0.113.1")

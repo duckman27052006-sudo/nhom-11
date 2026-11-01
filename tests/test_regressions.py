@@ -16,7 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import tftp_packet
-from src.tftp_client import TftpClient, build_arg_parser, validate_direction_args
+from src.tftp_client import (
+    ProgressPrinter,
+    TftpClient,
+    build_arg_parser,
+    format_progress,
+    validate_direction_args,
+)
 from src.tftp_errors import TftpFormatError, TftpIllegalOperation
 from src.tftp_metrics import Timer
 from src.tftp_packet import (
@@ -226,6 +232,39 @@ class TestServerProtocol(unittest.TestCase):
             finally:
                 sock.close()
             self.assertEqual(srv.server.metrics.counter("errors.unhandled"), 0)
+
+
+class TestCliProgress(unittest.TestCase):
+    def test_format_progress_with_total(self):
+        line = format_progress(500, 1000, 2.0)
+        self.assertIn("50%", line)
+        self.assertIn("ETA", line)
+        self.assertIn("█", line)
+
+    def test_format_progress_complete_and_zero_total(self):
+        self.assertIn("100%", format_progress(10, 10, 1.0))
+        self.assertIn("100%", format_progress(0, 0, 1.0))
+
+    def test_format_progress_without_total(self):
+        line = format_progress(2048, None, 1.0)
+        self.assertNotIn("%", line)
+        self.assertIn("KiB/s", line)
+
+    def test_printer_writes_line_and_finish(self):
+        stream = io.StringIO()
+        printer = ProgressPrinter(stream=stream, interval=0.0)
+        printer(512, 1024)
+        printer(1024, 1024)
+        printer.finish()
+        text = stream.getvalue()
+        self.assertIn("\r", text)
+        self.assertIn("100%", text)
+        self.assertTrue(text.endswith("\n"))
+
+    def test_cli_accepts_progress_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            args = build_arg_parser().parse_args(["--get", "a", "--progress"])
+        self.assertTrue(args.progress)
 
 
 class TestClientCliValidation(unittest.TestCase):

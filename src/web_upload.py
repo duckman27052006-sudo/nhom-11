@@ -28,14 +28,18 @@ import json
 import logging
 import os
 import secrets
+import socket
 import sys
 import tempfile
+import time
 
 from flask import Flask, Response, g, render_template_string, request, session
 
 from . import __version__, enable_utf8_console
 from .tftp_client import TftpClient, _parse_server
 from .tftp_errors import TftpError
+from .tftp_net import resolve_remote
+from .tftp_packet import MAX_DATAGRAM, RRQ
 
 LOG = logging.getLogger("tftp.web")
 
@@ -93,6 +97,19 @@ input[type=file] {
   width: 100%; padding: 12px; border: 1px dashed var(--line); border-radius: 12px;
   background: transparent; color: inherit;
 }
+.drop {
+  border: 1px dashed var(--line); border-radius: 12px; padding: 14px;
+  text-align: center; color: var(--muted); cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.drop.over { border-color: var(--accent); background: rgba(31, 111, 92, .08); }
+.drop input[type=file] { border: 0; padding: 6px 0; }
+.drop-hint { margin-top: 6px; font-size: 14px; }
+.picked {
+  list-style: none; margin: 12px 0 0; padding: 0;
+  font-size: 14px; color: var(--muted);
+}
+.picked li { padding: 3px 0; overflow-wrap: anywhere; }
 button {
   margin-top: 16px; width: 100%; padding: 12px 16px; border: 0; border-radius: 12px;
   background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 650;
@@ -111,8 +128,12 @@ button:disabled { opacity: .6; cursor: progress; }
   <p class="muted">File được chuyển thẳng tới thư mục gốc của TFTP server,
   không lưu trên trang này.</p>
   <form id="upload-form">
-    <label for="file">Chọn file cần gửi</label>
-    <input id="file" name="file" type="file" required>
+    <label for="file">Chọn file cần gửi (có thể chọn nhiều)</label>
+    <div id="drop" class="drop">
+      <input id="file" name="file" type="file" multiple>
+      <div class="drop-hint">Kéo file vào đây, hoặc bấm để chọn</div>
+    </div>
+    <ul id="picked" class="picked" hidden></ul>
     <button type="submit" id="submit">Gửi file</button>
   </form>
   <p id="status" role="status" aria-live="polite"></p>
@@ -122,37 +143,106 @@ button:disabled { opacity: .6; cursor: progress; }
 <script nonce="{{ nonce }}">
 const form = document.getElementById("upload-form");
 const input = document.getElementById("file");
+const drop = document.getElementById("drop");
+const picked = document.getElementById("picked");
 const button = document.getElementById("submit");
 const status = document.getElementById("status");
 const token = document.querySelector('meta[name="csrf-token"]').content;
+let files = [];
 
 function report(message, isError) {
   status.textContent = message;
   status.classList.toggle("error", Boolean(isError));
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (!input.files.length) return;
-  const body = new FormData();
-  body.append("file", input.files[0]);
-  button.disabled = true;
-  report("Đang gửi…", false);
-  try {
-    const response = await fetch("/upload", {
-      method: "POST",
-      body,
-      headers: { "X-CSRF-Token": token },
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
-    report("Đã gửi '" + data.filename + "' (" + data.bytes + " byte).", false);
-    form.reset();
-  } catch (error) {
-    report("Gửi thất bại: " + error.message, true);
-  } finally {
-    button.disabled = false;
+function setFiles(list) {
+  files = Array.from(list || []);
+  picked.innerHTML = "";
+  if (!files.length) {
+    picked.hidden = true;
+    button.textContent = "Gửi file";
+    return;
   }
+  picked.hidden = false;
+  for (const file of files) {
+    const item = document.createElement("li");
+    item.textContent = file.name + " (" + Math.max(1, Math.round(file.size / 1024)) + " KiB)";
+    picked.appendChild(item);
+  }
+  button.textContent = files.length > 1 ? "Gửi " + files.length + " file" : "Gửi file";
+}
+
+function markOver(active) {
+  drop.classList.toggle("over", active);
+}
+
+input.addEventListener("change", () => setFiles(input.files));
+drop.addEventListener("click", (event) => {
+  if (event.target !== input) input.click();
+});
+["dragenter", "dragover"].forEach((name) => {
+  drop.addEventListener(name, (event) => {
+    event.preventDefault();
+    markOver(true);
+  });
+});
+["dragleave", "dragend", "drop"].forEach((name) => {
+  drop.addEventListener(name, () => markOver(false));
+});
+drop.addEventListener("drop", (event) => {
+  event.preventDefault();
+  if (event.dataTransfer && event.dataTransfer.files.length) {
+    setFiles(event.dataTransfer.files);
+    uploadAll();  // kéo-thả thì gửi ngay
+  }
+});
+
+async function sendOne(file) {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch("/upload", {
+    method: "POST",
+    body,
+    headers: { "X-CSRF-Token": token },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
+  return data;
+}
+
+async function uploadAll() {
+  if (button.disabled) return;
+  if (!files.length) {
+    report("Chọn ít nhất một file.", true);
+    return;
+  }
+  const total = files.length;
+  let ok = 0;
+  let failed = 0;
+  button.disabled = true;
+  for (let index = 0; index < total; index++) {
+    const file = files[index];
+    report("Đang gửi " + (index + 1) + "/" + total + ": " + file.name + "…", false);
+    try {
+      await sendOne(file);
+      ok += 1;
+    } catch (error) {
+      failed += 1;
+      report(file.name + ": " + error.message, true);
+    }
+  }
+  report(
+    "Xong: " + ok + "/" + total + " file" + (failed ? " (" + failed + " lỗi)" : "") + ".",
+    failed > 0
+  );
+  setFiles([]);
+  input.value = "";
+  button.disabled = false;
+}
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  uploadAll();
 });
 </script>
 </body>
@@ -282,6 +372,27 @@ def _json_error(status: int, message: str) -> Response:
 
 
 # ---------------------------------------------------------------------- app ---
+def _probe_tftp(host: str, port: int, timeout: float = 0.5) -> bool:
+    """True nếu TFTP server trả lời một RRQ thăm dò (kể cả ERROR 1)."""
+    sock: socket.socket | None = None
+    try:
+        family, target = resolve_remote(host, port)
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        probe = RRQ(f".healthz-{secrets.token_hex(4)}.probe", "octet")
+        sock.sendto(probe.pack(), target)
+        sock.recvfrom(MAX_DATAGRAM)
+        return True
+    except OSError:
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 def create_app(
     *,
     allowed_networks: list[Network],
@@ -311,6 +422,7 @@ def create_app(
         TFTP_BLOCKSIZE=tftp_blocksize,
         TFTP_TIMEOUT=tftp_timeout,
         TFTP_RETRIES=tftp_retries,
+        STARTED_AT=time.monotonic(),
     )
 
     @app.before_request
@@ -367,6 +479,26 @@ def create_app(
             max_mib=max_file_bytes // (1024 * 1024),
         )
         return Response(html, mimetype="text/html; charset=utf-8")
+
+    @app.get("/healthz")
+    def healthz() -> Response:
+        """Liveness/readiness cho giám sát; ``?probe=1`` kiểm tra TFTP thật."""
+        host = str(app.config["TFTP_HOST"])
+        port = int(app.config["TFTP_PORT"])
+        started_at = float(app.config["STARTED_AT"])
+        payload: dict[str, object] = {
+            "ok": True,
+            "uptime_s": round(time.monotonic() - started_at, 3),
+            "version": __version__,
+            "tftp": {"host": host, "port": port},
+        }
+        status = 200
+        if request.args.get("probe") == "1":
+            reachable = _probe_tftp(host, port)
+            payload["ok"] = reachable
+            payload["tftp"] = {"host": host, "port": port, "reachable": reachable}
+            status = 200 if reachable else 503
+        return _json_response(payload, status=status)
 
     @app.post("/upload")
     def upload() -> Response:

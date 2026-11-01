@@ -90,6 +90,8 @@ tại `[::1]:6969`.
 
 - Mặc định giới hạn HTTP 100 MiB mỗi file, điều chỉnh bằng `--max-file-size`
   (MiB). TFTP server cũng áp dụng các giới hạn của chính nó.
+- Trang upload cho chọn hoặc kéo-thả **nhiều file**; trình duyệt gửi tuần tự từng
+  file (mỗi file một `POST /upload`), file lỗi không chặn các file sau.
 - Tên file được làm sạch trước khi gửi WRQ; TFTP server xử lý xung đột tên.
 - Web app giữ một bản tạm ngắn hạn trên máy gateway để TFTP client đọc khi gửi.
   Bản tạm được xóa sau khi transfer thành công hoặc thất bại; file hoàn chỉnh
@@ -98,6 +100,16 @@ tại `[::1]:6969`.
   mục gốc TFTP mới xem/quản lý được dữ liệu.
 - Cổng upload không quét virus và không xác thực danh tính người gửi. Nếu cần
   kiểm tra malware, chuyển file vào vùng quarantine và quét trước khi sử dụng.
+
+## Giám sát: `GET /healthz`
+
+- Không tham số: trả nhanh JSON `{"ok": true, "uptime_s": ..., "version": ...,
+  "tftp": {"host": ..., "port": ...}}` — chỉ xác nhận tiến trình HTTP còn sống,
+  **không** tạo phiên TFTP.
+- `?probe=1`: gửi một RRQ thăm dò (tên ngẫu nhiên) tới TFTP server, chờ tối đa
+  0.5 s. Có phản hồi (kể cả ERROR 1) → `"reachable": true`, HTTP 200; không có →
+  `"reachable": false`, HTTP **503** để health check đánh dấu unhealthy.
+- Route chịu cùng ACL peer IP như các route khác.
 
 ## Ranh giới mạng và bảo mật
 

@@ -483,6 +483,76 @@ def _blksize_value(value: str) -> int:
     return size
 
 
+def _human_bytes(size: float) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def _human_eta(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, sec = divmod(rest, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def format_progress(done: int, total: int | None, elapsed: float, width: int = 16) -> str:
+    """Một dòng tiến trình cho CLI (hàm thuần, dễ test).
+
+    ``total=None`` (server không trả ``tsize``) thì chỉ hiện byte đã truyền và
+    tốc độ, không bịa phần trăm.
+    """
+    done = max(0, int(done))
+    speed = done / elapsed if elapsed > 0 else 0.0
+    if total is not None:
+        total = max(0, int(total))
+        fraction = 1.0 if total == 0 else min(1.0, done / total)
+        filled = int(round(fraction * width))
+        bar = "█" * filled + "░" * (width - filled)
+        percent = int(fraction * 100)
+        remaining = max(0, total - done)
+        eta = _human_eta(remaining / speed) if speed > 0 else "--:--"
+        return f"[{bar}] {percent:3d}%  {_human_bytes(speed)}/s  ETA {eta}"
+    return f"{_human_bytes(done)}  {_human_bytes(speed)}/s"
+
+
+class ProgressPrinter:
+    """Callback tiến trình in một dòng cập nhật trên stderr (tối đa ~10 lần/giây)."""
+
+    def __init__(self, stream=None, interval: float = 0.1, width: int = 16) -> None:
+        self.stream = stream if stream is not None else sys.stderr
+        self.interval = max(0.0, interval)
+        self.width = width
+        self._started = time.monotonic()
+        self._last = -1.0
+        self._last_len = 0
+        self._finished = False
+
+    def __call__(self, done: int, total: int | None) -> None:
+        now = time.monotonic()
+        # Luôn in lần cuối (done == total) để không bỏ mất dòng 100%.
+        if now - self._last < self.interval and total != done:
+            return
+        self._last = now
+        line = format_progress(done, total, now - self._started, self.width)
+        padding = " " * max(0, self._last_len - len(line))
+        self.stream.write("\r" + line + padding)
+        self.stream.flush()
+        self._last_len = len(line)
+
+    def finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.stream.write("\n")
+        self.stream.flush()
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     from . import __version__
 
@@ -524,6 +594,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-file", default=None, help="ghi log ra file")
     parser.add_argument(
         "--stats", action="store_true", help="in số liệu vận hành (metrics) khi kết thúc"
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="hiện thanh tiến trình trên stderr trong khi truyền",
     )
     parser.add_argument(
         "--stats-json", default=None, help="ghi số liệu vận hành ra file JSON khi kết thúc"
@@ -578,12 +653,13 @@ def main(argv: list | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
         return 2
+    reporter = ProgressPrinter() if args.progress else None
     try:
         if args.get:
             local = args.save or os.path.basename(args.get) or "download.out"
-            client.download(args.get, local)
+            client.download(args.get, local, progress=reporter)
         else:
-            client.upload(args.put, args.remote or os.path.basename(args.put))
+            client.upload(args.put, args.remote or os.path.basename(args.put), progress=reporter)
     except tftp_errors.TftpError as exc:
         LOG.error("truyền thất bại: %s", exc)
         return 1
@@ -591,6 +667,8 @@ def main(argv: list | None = None) -> int:
         LOG.error("lỗi hệ thống: %s", exc)
         return 2
     finally:
+        if reporter is not None:
+            reporter.finish()
         if args.stats:
             LOG.info("thống kê:\n%s", client.metrics.render())
         if args.stats_json:

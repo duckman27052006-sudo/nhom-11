@@ -18,12 +18,13 @@ import logging
 import os
 import time
 
-from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
+from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -225,7 +226,7 @@ class StatusBar(Surface):
         self.message.setFont(theme.font(8, mono=True))
         muted(self.message, "text_muted")
         layout.addWidget(self.message, 1)
-        self.hint = QLabel("Ctrl+L: xóa nhật ký · Ctrl+K: dừng server")
+        self.hint = QLabel("Ctrl+L: xóa nhật ký · Ctrl+K: dừng server · F1: phím tắt")
         self.hint.setFont(theme.font(8, mono=True))
         muted(self.hint, "text_subtle")
         layout.addWidget(self.hint)
@@ -250,6 +251,7 @@ class MainWindow(QWidget):
         self._intro_fade: QPropertyAnimation | None = None
         self._log_lines: list[tuple[str, str]] = []
         self._close_pending = False
+        self._last_download_path: str | None = None
 
         self.log_bridge = LogBridge(self)
         self.uptime = motion.Ticker(1000, self)
@@ -288,11 +290,54 @@ class MainWindow(QWidget):
         )
 
     def _install_shortcuts(self) -> None:
-        for sequence, slot in (("Ctrl+L", self._clear_log), ("Ctrl+K", self._stop_server)):
+        bindings: list[tuple[str, object]] = [
+            ("Ctrl+L", self._clear_log),
+            ("Ctrl+K", self._stop_server),
+            ("F1", self._show_shortcuts),
+        ]
+        for index in range(len(NAV_ITEMS)):
+            bindings.append(
+                (f"Ctrl+{index + 1}", lambda _checked=False, page=index: self.go_to(page))
+            )
+        for sequence, slot in bindings:
             action = QAction(self)
             action.setShortcut(sequence)
             action.triggered.connect(slot)
             self.addAction(action)
+
+    @Slot()
+    def _show_shortcuts(self) -> None:
+        self._build_shortcuts_dialog().exec()
+
+    def _build_shortcuts_dialog(self) -> QDialog:
+        """Hộp thoại phím tắt (tách khỏi exec để test offscreen được)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Phím tắt")
+        dialog.setMinimumWidth(380)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+        title = QLabel("Phím tắt")
+        title.setFont(theme.bold(11))
+        layout.addWidget(title)
+        rows = (
+            ("Ctrl+L", "Xoá nhật ký"),
+            ("Ctrl+K", "Dừng server"),
+            ("Ctrl+1 … Ctrl+4", "Chuyển trang"),
+            ("F1", "Mở hộp thoại này"),
+        )
+        for keys, description in rows:
+            row = QHBoxLayout()
+            key_label = QLabel(keys)
+            key_label.setFont(theme.font(9, mono=True))
+            key_label.setMinimumWidth(140)
+            row.addWidget(key_label)
+            row.addWidget(QLabel(description), 1)
+            layout.addLayout(row)
+        close_button = make_button("Đóng", "primary")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        return dialog
 
     @staticmethod
     def _page(content: QWidget) -> QScrollArea:
@@ -504,6 +549,10 @@ class MainWindow(QWidget):
         self.download_button = make_button("Tải về", "primary")
         self.download_button.setMinimumHeight(40)
         self.download_button.clicked.connect(self._start_download)
+        self.download_open = make_button("Mở thư mục", "ghost")
+        self.download_open.setEnabled(False)
+        self.download_open.setToolTip("Mở thư mục chứa file vừa tải")
+        self.download_open.clicked.connect(self._open_download_folder)
 
         self.download_banner = ErrorBanner()
         self.download_progress = ShimmerProgressBar()
@@ -515,7 +564,11 @@ class MainWindow(QWidget):
         # Khoảng trống dồn lên đây (không nở header) để nút bám đáy card,
         # thẳng hàng với nút Gửi lên ở card cạnh.
         card.add_stretch(1)
-        card.add(self.download_button)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addWidget(self.download_button, 1)
+        actions.addWidget(self.download_open)
+        card.add_layout(actions)
         card.add(self.download_banner)
         card.add(self.download_progress)
         card.add(self.download_status)
@@ -727,8 +780,11 @@ class MainWindow(QWidget):
 
         save_button = make_button("Lưu ra file", "ghost")
         save_button.clicked.connect(self._save_log)
+        copy_button = make_button("Sao chép", "ghost")
+        copy_button.clicked.connect(self._copy_log)
         clear_button = make_button("Xóa", "ghost")
         clear_button.clicked.connect(self._clear_log)
+        toolbar.addWidget(copy_button)
         toolbar.addWidget(save_button)
         toolbar.addWidget(clear_button)
         layout.addLayout(toolbar)
@@ -842,6 +898,17 @@ class MainWindow(QWidget):
             self.status_bar.message.setText(f"Không lưu được nhật ký: {exc}")
             return
         self.status_bar.message.setText(f"Đã lưu nhật ký: {path}")
+
+    @Slot()
+    def _copy_log(self) -> None:
+        text = self.log_view.toPlainText()
+        if not text.strip():
+            self.status_bar.message.setText("Nhật ký đang trống")
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        self.status_bar.message.setText("Đã sao chép nhật ký vào clipboard")
 
     # ------------------------------------------------------------ navigation ---
     @Slot(int)
@@ -1213,6 +1280,7 @@ class MainWindow(QWidget):
             return
         save = self.download_save.text().strip() or os.path.basename(name) or "download.out"
 
+        self.download_open.setEnabled(False)
         client = TftpClient(
             target[0],
             target[1],
@@ -1248,7 +1316,21 @@ class MainWindow(QWidget):
         self.download_status.setText(f"Đã lưu: {path}")
         self.status_bar.message.setText(f"Tải về thành công: {path}")
         self.toast.show_message(f"Tải về thành công: {path}", "ok")
+        self._last_download_path = path
+        self.download_open.setEnabled(os.path.isfile(path))
         self._refresh_files(quiet=True)
+
+    @Slot()
+    def _open_download_folder(self) -> None:
+        path = self._last_download_path
+        if not path:
+            return
+        folder = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(folder):
+            self.status_bar.message.setText(f"Không tồn tại thư mục: {folder}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+            self.status_bar.message.setText(f"Không mở được thư mục: {folder}")
 
     @Slot(str)
     def _on_download_err(self, message: str) -> None:

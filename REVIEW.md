@@ -7,7 +7,7 @@
 > trường thực tâm** — có fuzz có seed, soak/stress test, metrics vận hành và CI
 > chạy riêng bộ soak. Vẫn còn một khoảng trống thuần lý thuyết: chưa có kiểm thử
 > chéo với TFTP client/server của bên thứ ba.
-> Trạng thái kiểm tra: `python -m unittest discover` → **166 test PASS**,
+> Trạng thái kiểm tra: `python -m unittest discover` → **180 test PASS**,
 > `ruff check .` → **sạch**, `mypy src` → **sạch**.
 
 ---

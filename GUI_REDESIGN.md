@@ -259,7 +259,7 @@ lệch nhau):
 | P3 | Motion v2 (§6) + copywriting (§7) | `motion.py`, `main_window.py` | Resize giữa slide không kẹt |
 | P4 | README/docs cập nhật ảnh mới | `README.md`, `docs/` | — |
 
-Sau mỗi phase: `ruff check src` + `python -m unittest discover` (giữ toàn bộ 166
+Sau mỗi phase: `ruff check src` + `python -m unittest discover` (giữ toàn bộ 180
 test xanh) + smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
 
 **Ràng buộc bất biến**: QPainter+QPalette (không QSS toàn cục); Fusion style;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -147,12 +148,59 @@ class TestPage(unittest.TestCase):
             self.assertEqual(response.headers["Cache-Control"], "no-store")
             self.assertNotIn("Access-Control-Allow-Origin", response.headers)
 
+    def test_page_supports_multiple_files_and_drop(self):
+        with TftpHarness() as harness:
+            body = make_app(harness).test_client().get("/").get_data(as_text=True)
+            self.assertIn('multiple', body)
+            self.assertIn('id="drop"', body)
+            self.assertIn('id="picked"', body)
+
     def test_no_listing_or_download_routes(self):
         with TftpHarness() as harness:
             client = make_app(harness).test_client()
             for path in ("/files", "/download", "/files/hello.txt"):
                 with self.subTest(path=path):
                     self.assertEqual(client.get(path).status_code, 404)
+
+
+class TestHealthz(unittest.TestCase):
+    def test_healthz_reports_config_without_probe(self):
+        with TftpHarness() as harness:
+            client = make_app(harness).test_client()
+            response = client.get("/healthz")
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()
+            self.assertTrue(data["ok"])
+            self.assertGreaterEqual(data["uptime_s"], 0)
+            self.assertEqual(data["tftp"]["host"], "127.0.0.1")
+            self.assertEqual(data["tftp"]["port"], harness.port)
+            self.assertNotIn("reachable", data["tftp"])
+
+    def test_healthz_probe_reaches_running_server(self):
+        with TftpHarness() as harness:
+            client = make_app(harness).test_client()
+            response = client.get("/healthz?probe=1")
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["tftp"]["reachable"])
+
+    def test_healthz_probe_dead_server_returns_503(self):
+        probe_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe_sock.bind(("127.0.0.1", 0))
+        dead_port = probe_sock.getsockname()[1]
+        probe_sock.close()
+        with TftpHarness() as harness:
+            client = make_app(harness, tftp_port=dead_port).test_client()
+            response = client.get("/healthz?probe=1")
+            self.assertEqual(response.status_code, 503)
+            data = response.get_json()
+            self.assertFalse(data["ok"])
+            self.assertFalse(data["tftp"]["reachable"])
+
+    def test_healthz_obeys_network_acl(self):
+        with TftpHarness() as harness:
+            client = make_app(harness).test_client()
+            response = client.get("/healthz", environ_base={"REMOTE_ADDR": "10.9.9.9"})
+            self.assertEqual(response.status_code, 403)
 
 
 class TestUpload(unittest.TestCase):
@@ -167,6 +215,16 @@ class TestUpload(unittest.TestCase):
             self.assertEqual(data["filename"], "hello.bin")
             self.assertEqual(data["bytes"], len(payload))
             self.assertEqual(harness.read("hello.bin"), payload)
+
+    def test_multiple_files_uploaded_sequentially(self):
+        with TftpHarness() as harness:
+            client = make_app(harness).test_client()
+            token = csrf_token(client)
+            for name, payload in (("first.bin", b"first"), ("second.bin", b"second")):
+                response = upload(client, payload, name, token)
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(harness.read("first.bin"), b"first")
+            self.assertEqual(harness.read("second.bin"), b"second")
 
     def test_empty_file_is_allowed(self):
         with TftpHarness() as harness:

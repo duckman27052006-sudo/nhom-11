@@ -14,7 +14,7 @@ viết bằng Python 3.10+; **phần lõi chỉ dùng thư viện chuẩn** (`so
 | Mã lỗi | `src/tftp_errors.py` | Bảng mã lỗi RFC 1350 + ngoại lệ |
 | Địa chỉ | `src/tftp_net.py` | Phân giải và bind socket cho cả IPv4 lẫn IPv6 |
 | Số liệu | `src/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
-| Test | `tests/` | 166 test (unit + tích hợp + fuzz + soak + web + hồi quy + GUI), tất cả PASS |
+| Test | `tests/` | 180 test (unit + tích hợp + fuzz + soak + web + hồi quy + GUI), tất cả PASS |
 
 ## 1. Cài đặt
 
@@ -50,11 +50,15 @@ Bố cục chia **4 trang** để không dồn hết chức năng vào một mà
 | **Tổng quan** | Hero đổi theo trạng thái server, lưới số liệu 2×2 cạnh hoạt động gần đây, 2 lối tắt nhanh + liên kết phụ |
 | **Truyền file** | Một hàng **"Đích đến"** dùng chung cho cả hai chiều · Tải về \| Gửi lên · bảng File trên server (bấm hàng để điền ô tải về), banner lỗi + toast |
 | **Máy chủ** | Cấu hình theo khối dọc (lắng nghe, thư mục, 3 giới hạn đều nhau, tùy chọn 2×2) + bảng file (trạng thái trống có nút hành động), bấm đúp để điền vào ô tải về |
-| **Nhật ký** | Luồng gói client trực tiếp (RRQ/WRQ/OACK/DATA/ACK/ERROR), log thời gian thực, lọc mức, lưu log |
+| **Nhật ký** | Luồng gói client trực tiếp (RRQ/WRQ/OACK/DATA/ACK/ERROR), log thời gian thực, lọc mức, sao chép/lưu log |
 
 Chi tiết ngôn ngữ thiết kế xem `GUI_REDESIGN.md`.
 
-Phím tắt: `Ctrl+L` xóa nhật ký · `Ctrl+K` dừng server.
+Phím tắt: `Ctrl+L` xóa nhật ký · `Ctrl+K` dừng server · `Ctrl+1..4` chuyển trang ·
+`F1` mở bảng phím tắt.
+
+Tiện ích: nút **Mở thư mục** cạnh nút Tải về (mở thư mục chứa file vừa tải) và
+nút **Sao chép** trên trang Nhật ký (copy toàn bộ log vào clipboard).
 
 Hiệu ứng (tất cả nằm gọn trong `src/gui/motion.py`): chuyển trang trôi nhẹ từ
 dưới lên, cửa sổ mờ dần khi mở, chấm trạng thái nhịp thở, thanh tiến trình
@@ -88,7 +92,9 @@ python -m src.web_upload \
 Cổng chỉ bind vào một địa chỉ private/loopback cụ thể (mặc định `127.0.0.1`),
 bắt buộc ít nhất một `--allowed-network`, kiểm tra peer IP thật + `Origin` + CSRF
 token, giới hạn dung lượng và thêm CSP/security headers. Không có route liệt kê
-hay tải file. IPv6 cũng dùng được, ví dụ `--host fd12:3456:789a::10
+hay tải file. Trang upload cho chọn/kéo-thả **nhiều file** và gửi tuần tự từng
+file. `GET /healthz` trả JSON trạng thái; thêm `?probe=1` để kiểm tra TFTP server
+thật (503 nếu không tới được). IPv6 cũng dùng được, ví dụ `--host fd12:3456:789a::10
 --allowed-network fd12:3456:789a::/64 --tftp-server "[::1]:6969"`.
 
 Chi tiết và giới hạn bảo mật: [`docs/web-upload.md`](docs/web-upload.md).
@@ -179,6 +185,7 @@ python -m src.tftp_gui
 | `--retries` | `5` | số lần thử lại |
 | `--no-options` | tắt | giao thức thuần RFC 1350, blksize cố định 512 |
 | `--stats` | tắt | in số liệu vận hành (metrics) khi kết thúc |
+| `--progress` | tắt | hiện thanh tiến trình (%/tốc độ/ETA) trên stderr |
 | `--stats-json` | — | ghi số liệu vận hành ra file JSON |
 | `--log-file` | — | ghi thêm log ra file (vẫn in ra console) |
 | `--version` | | in version rồi thoát |
@@ -257,6 +264,8 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 27 | web gateway | upload qua HTTP multipart → TFTP, ACL mạng, CSRF, Origin, giới hạn dung lượng |
 | 28 | hồi quy | option quá dài, OACK thiếu `blksize`, `tsize` echo, netascii CR NUL, CLI validation |
 | 29 | GUI smoke | offscreen: đổi theme, lọc log theo mức, bind lỗi vẫn khởi động lại được |
+| 30 | CLI progress | `format_progress` 0/50/100%, `total=None`, printer + `--progress` |
+| 31 | healthz + nhiều file | probe TFTP sống/chết (200/503), gửi nhiều file tuần tự, markup kéo-thả |
 
 Soak test nặng hơn bằng biến môi trường:
 
@@ -277,6 +286,9 @@ Mỗi bên đo: số phiên (bắt đầu / hoàn tất / timeout), số gói ti
 **số lần gửi lại**, byte thật, RTT và thời gian phiên với `p50/p95/p99`, số phiên
 đang chạy. Danh mục đầy đủ và cách tính tỉ lệ lỗi:
 [`docs/observability.md`](docs/observability.md).
+
+Cổng web upload có `GET /healthz` để health check; thêm `?probe=1` để kiểm tra
+TFTP server thật (trả 503 nếu không tới được).
 
 ## 8. Kiểm tra bằng Wireshark
 
@@ -305,7 +317,11 @@ Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 �
 - Hỗ trợ **IPv4 và IPv6** cho cả server lẫn client (`src/tftp_net.py`); `--host ::1`,
   `--server [::1]:6969` đều dùng được.
 - Cổng **web upload** tuỳ chọn: HTTP multipart → TFTP WRQ, ACL theo peer IP,
-  CSRF + Origin, CSP, giới hạn dung lượng (`src/web_upload.py`).
+  CSRF + Origin, CSP, giới hạn dung lượng (`src/web_upload.py`). Chọn/kéo-thả
+  nhiều file, gửi tuần tự; `GET /healthz[?probe=1]` cho giám sát.
+- **`--progress`** cho client: thanh tiến trình %, tốc độ, ETA trên stderr.
+- GUI: **Mở thư mục** sau khi tải, **Sao chép** nhật ký, `F1` bảng phím tắt,
+  `Ctrl+1..4` chuyển trang.
 - `--log-file` ghi thêm ra file chứ không thay log console.
 - TID riêng cho từng phiên, kiểm tra nguồn gói để chống lẫn dữ liệu giữa các client.
 - So khớp `(addr, filename, mode, options)` để phát hiện OS cấp lại cùng port

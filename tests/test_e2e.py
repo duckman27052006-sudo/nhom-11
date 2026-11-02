@@ -40,6 +40,9 @@ class ServerHarness:
         options.setdefault("timeout", 1.0)
         options.setdefault("retries", 3)
         options.setdefault("logger", QUIET)
+        # Test không cần cửa sổ dally sau ACK cuối (RFC 1350 §5): nó chỉ làm
+        # mỗi lượt RRQ chậm thêm 1 giây. Hành vi đó có test riêng.
+        options.setdefault("final_ack_dally", 0.0)
         self.server = TftpServer(root=self.root, **options)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 

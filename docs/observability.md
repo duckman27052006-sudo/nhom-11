@@ -142,3 +142,10 @@ Mọi thao tác đều an toàn khi gọi từ nhiều thread (server mở 1 thr
 - `sessions.active` bằng `max_clients` thường xuyên — cần nâng `--max-clients`
   hoặc thêm server.
 - `exchange.rtt.p99 > timeout / 2` — timeout đang quá chặt, dễ retry giả.
+- `requests.disk_limited > 0` — chạm `min_free_bytes`/`max_total_bytes`; kiểm tra
+  dung lượng đĩa và quota trước khi tăng giới hạn.
+- `requests.oversized > 0` — client gửi file vượt `max_file_size`; xem lại chính
+  sách upload thay vì nâng giới hạn tùy tiện.
+- Log rotation: `--log-file` dùng `RotatingFileHandler`; đặt `--log-max-bytes` và
+  `--log-backups` để tránh đầy ổ. Cảnh báo khi file log gần giới hạn hoặc handler
+  báo lỗi ghi.

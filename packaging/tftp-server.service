@@ -1,0 +1,24 @@
+[Unit]
+Description=TFTP server (RFC 1350, IPv4/IPv6)
+Documentation=file:///opt/tftp/docs/deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tftp
+Group=tftp
+WorkingDirectory=/opt/tftp
+ExecStart=/usr/bin/python3 -m src.tftp_server --config /etc/tftp/server.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tftp
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

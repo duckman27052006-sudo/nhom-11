@@ -192,7 +192,10 @@ class TestUpload(unittest.TestCase):
             self.assertEqual(srv.read("zero.bin"), b"")
 
     def test_upload_overwrite(self):
-        with ServerHarness({"dup.bin": b"old"}) as srv, tempfile.TemporaryDirectory() as out:
+        with (
+            ServerHarness({"dup.bin": b"old"}, allow_overwrite=True) as srv,
+            tempfile.TemporaryDirectory() as out,
+        ):
             source = str(Path(out) / "dup.bin")
             Path(source).write_bytes(b"new-content")
             srv.client().upload(source, "dup.bin")

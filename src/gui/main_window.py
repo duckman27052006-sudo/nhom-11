@@ -14,19 +14,26 @@ bao giờ bị treo. Chuyển trang dùng `motion`; màu sắc lấy từ
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
+import re
+import shutil
+import socket
+import subprocess
 import time
 
 from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QScrollArea,
@@ -34,6 +41,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -41,6 +49,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..tftp_client import TftpClient, _parse_server
+from ..tftp_config import DEFAULT_MAX_TOTAL_BYTES
 from ..tftp_errors import TftpError
 from ..tftp_server import TftpServer
 from . import motion, theme
@@ -85,6 +94,33 @@ def human_size(size: float) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+def discover_lan_ipv4() -> str | None:
+    """Find the private IPv4 address selected for the machine's default route."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))
+        address = probe.getsockname()[0]
+    except OSError:
+        try:
+            candidates = socket.getaddrinfo(
+                socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM
+            )
+        except OSError:
+            return None
+        for candidate in candidates:
+            parsed = ipaddress.ip_address(candidate[4][0])
+            if parsed.is_private and not parsed.is_loopback and not parsed.is_link_local:
+                return str(parsed)
+        return None
+    finally:
+        probe.close()
+
+    parsed = ipaddress.ip_address(address)
+    if parsed.is_private and not parsed.is_loopback and not parsed.is_link_local:
+        return str(parsed)
+    return None
 
 
 def muted(widget: QWidget, key: str = "text_muted") -> QWidget:
@@ -276,6 +312,7 @@ class MainWindow(QWidget):
         self.toast.hide()
 
         self.log_bridge.attach(callback=self._on_log)
+        self.log_bridge.packet.connect(self._on_packet)
         self._install_shortcuts()
         self._set_running(False)
         self._set_backgrounds()
@@ -617,6 +654,13 @@ class MainWindow(QWidget):
 
         self.host_edit = QLineEdit("0.0.0.0")
         self.host_edit.setMinimumHeight(34)
+        self.host6_edit = QLineEdit("::")
+        self.host6_edit.setMinimumHeight(34)
+        self.family_combo = ChevronComboBox()
+        self.family_combo.addItems(["auto", "ipv4", "ipv6", "dual"])
+        self.family_combo.setToolTip(
+            "auto: suy ra từ địa chỉ; dual: mở cả IPv4 và IPv6 trên cùng cổng"
+        )
         self.port_spin = NumberInput(1, 65535, 6969, width=110)
         self.root_edit = QLineEdit("files")
         self.root_edit.setMinimumHeight(34)
@@ -637,27 +681,67 @@ class MainWindow(QWidget):
         # Hàng lắng nghe: host chiếm 3/4, cổng 1/4 (đỡ chênh độ dài).
         listen_row = QHBoxLayout()
         listen_row.setSpacing(12)
-        listen_row.addWidget(Field("Địa chỉ lắng nghe", self.host_edit), 3)
+        listen_row.addWidget(Field("Địa chỉ IPv4 lắng nghe", self.host_edit), 3)
         listen_row.addWidget(Field("Cổng UDP", self.port_spin, "69 cần quyền admin"), 1)
         card.add_layout(listen_row)
 
+        family_row = QHBoxLayout()
+        family_row.setSpacing(12)
+        family_row.addWidget(Field("Họ địa chỉ", self.family_combo), 1)
+        family_row.addWidget(Field("Địa chỉ IPv6", self.host6_edit, "dùng khi ipv6/dual"), 2)
+        card.add_layout(family_row)
+
+        self.lan_web_url = QLabel("Chưa tìm thấy địa chỉ IPv4 LAN")
+        self.lan_web_url.setFont(theme.font(9, mono=True))
+        self.lan_web_url.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        muted(self.lan_web_url)
+        refresh_lan_ip = make_button("Làm mới IP", "subtle")
+        refresh_lan_ip.clicked.connect(self._refresh_lan_web_url)
+        self.copy_lan_web_url = make_button("Sao chép địa chỉ web", "ghost")
+        self.copy_lan_web_url.setToolTip(
+            "Sao chép URL gateway web LAN; gateway cần được khởi động riêng."
+        )
+        self.copy_lan_web_url.clicked.connect(self._copy_lan_web_url)
+        lan_url_row = QWidget()
+        lan_url_layout = QHBoxLayout(lan_url_row)
+        lan_url_layout.setContentsMargins(0, 0, 0, 0)
+        lan_url_layout.setSpacing(8)
+        lan_url_layout.addWidget(self.lan_web_url, 1)
+        lan_url_layout.addWidget(refresh_lan_ip)
+        lan_url_layout.addWidget(self.copy_lan_web_url)
+        card.add(
+            Field(
+                "Địa chỉ để nhập vào web",
+                lan_url_row,
+                "Chỉ dùng được khi đã chạy web gateway trên cùng máy.",
+            )
+        )
+        self._refresh_lan_web_url()
+
         card.add(Field("Thư mục gốc", root_row))
 
-        # Ba giới hạn chia 3 cột bằng nhau tuyệt đối.
+        # Các giới hạn server được căn đều theo một hàng.
         self.blksize_spin = NumberInput(8, 65464, 1468)
         self.max_clients_spin = NumberInput(1, 4096, 32)
         self.max_size_spin = NumberInput(
             0, 2_147_483_647, 0, suffix=" byte", special_text="không giới hạn"
         )
+        self.max_total_size_spin = NumberInput(
+            1, 2_147_483_647, DEFAULT_MAX_TOTAL_BYTES, suffix=" byte"
+        )
         limits = QGridLayout()
         limits.setHorizontalSpacing(12)
-        limits.setColumnStretch(0, 1)
-        limits.setColumnStretch(1, 1)
-        limits.setColumnStretch(2, 1)
+        for column in range(4):
+            limits.setColumnStretch(column, 1)
         limits.addWidget(Field("Blksize mặc định", self.blksize_spin, "8..65464"), 0, 0)
         limits.addWidget(Field("Client tối đa", self.max_clients_spin), 0, 1)
         limits.addWidget(
             Field("Giới hạn upload", self.max_size_spin, "0 = không giới hạn"), 0, 2
+        )
+        limits.addWidget(
+            Field("Quota tổng", self.max_total_size_spin, "mặc định 500 MiB"), 0, 3
         )
         card.add_layout(limits)
 
@@ -672,17 +756,27 @@ class MainWindow(QWidget):
         toggles.setColumnStretch(0, 1)
         toggles.setColumnStretch(1, 1)
         self.no_overwrite = QCheckBox("Không ghi đè")
+        self.no_overwrite.setChecked(True)
         self.no_options = QCheckBox("Tắt option RFC 2347")
         self.allow_subdirs = QCheckBox("Cho phép thư mục con")
         self.low_rate = QCheckBox("Giới hạn 100 request/s")
         self.low_rate.setChecked(True)
-        for box in (self.no_overwrite, self.no_options, self.allow_subdirs, self.low_rate):
+        self.evict_oldest = QCheckBox("Tự xóa file cũ nhất khi đầy quota")
+        self.evict_oldest.setChecked(True)
+        for box in (
+            self.no_overwrite,
+            self.no_options,
+            self.allow_subdirs,
+            self.low_rate,
+            self.evict_oldest,
+        ):
             box.setCursor(Qt.CursorShape.PointingHandCursor)
             box.setMinimumHeight(26)
         toggles.addWidget(self.no_overwrite, 0, 0)
         toggles.addWidget(self.no_options, 0, 1)
         toggles.addWidget(self.allow_subdirs, 1, 0)
         toggles.addWidget(self.low_rate, 1, 1)
+        toggles.addWidget(self.evict_oldest, 2, 0, 1, 2)
 
         card.add_layout(toggles)
         return card
@@ -719,6 +813,13 @@ class MainWindow(QWidget):
         self.log_autoscroll.setChecked(True)
         self.log_autoscroll.setCursor(Qt.CursorShape.PointingHandCursor)
         toolbar.addWidget(self.log_autoscroll)
+        wireshark_button = make_button(
+            "Mở Wireshark",
+            "ghost",
+            "Bắt UDP loopback, lọc riêng lưu lượng máy này để không lẫn multicast trên LAN.",
+        )
+        wireshark_button.clicked.connect(self._open_wireshark)
+        toolbar.addWidget(wireshark_button)
         bottom_button = make_button("Về cuối", "ghost")
         bottom_button.clicked.connect(self._scroll_log_to_end)
         toolbar.addWidget(bottom_button)
@@ -731,16 +832,34 @@ class MainWindow(QWidget):
         toolbar.addWidget(clear_button)
         layout.addLayout(toolbar)
 
+        self.log_tabs = QTabWidget()
+        self.packet_table = QTableWidget(0, 4)
+        self.packet_table.setHorizontalHeaderLabels(["Thời gian", "Luồng", "Gói", "Chi tiết"])
+        self.packet_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.packet_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.packet_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.packet_table.setShowGrid(False)
+        self.packet_table.verticalHeader().hide()
+        self.packet_table.verticalHeader().setDefaultSectionSize(28)
+        self.packet_table.setFont(theme.font(8.5, mono=True))
+        header = self.packet_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.log_tabs.addTab(self.packet_table, "Luồng gói TFTP")
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.log_view.setFont(theme.font(9, mono=True))
         self._style_terminal()
-        layout.addWidget(self.log_view, 1)
+        self.log_tabs.addTab(self.log_view, "Nhật ký ứng dụng")
+        layout.addWidget(self.log_tabs, 1)
 
         note = QLabel(
-            "Server và client đều chạy ở thread riêng; nhật ký ở đây nhận trực tiếp "
-            "từ logging của Python nên không bỏ sót gói tin nào."
+            "Luồng gói hiển thị trao đổi do client trong GUI thực hiện. Để xem gói UDP "
+            "trên mạng, mở Wireshark và bắt trên Npcap Loopback Adapter trước khi truyền."
         )
         note.setFont(theme.font(8.5))
         muted(note, "text_subtle")
@@ -758,6 +877,96 @@ class MainWindow(QWidget):
         )
 
     # --------------------------------------------------------------- logging ---
+    @Slot(float, str, str)
+    def _on_packet(self, timestamp: float, flow: str, description: str) -> None:
+        packet_name, _, details = description.partition(" ")
+        row = self.packet_table.rowCount()
+        self.packet_table.insertRow(row)
+        clock = time.strftime("%H:%M:%S", time.localtime(timestamp))
+        time_text = f"{clock}.{int(timestamp % 1 * 1000):03d}"
+        values = (time_text, flow, packet_name, details)
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            if column < 3:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.packet_table.setItem(row, column, item)
+        if self.packet_table.rowCount() > MAX_LOG_LINES:
+            self.packet_table.removeRow(0)
+        self.log_tabs.setTabText(0, f"Luồng gói TFTP · {self.packet_table.rowCount()}")
+        if self.log_autoscroll.isChecked():
+            self.packet_table.scrollToBottom()
+
+    @Slot()
+    def _open_wireshark(self) -> None:
+        executable = shutil.which("wireshark") or shutil.which("Wireshark")
+        if executable is None:
+            for program_files in (
+                os.environ.get("ProgramFiles", r"C:\Program Files"),
+                os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            ):
+                candidate = os.path.join(program_files, "Wireshark", "Wireshark.exe")
+                if os.path.isfile(candidate):
+                    executable = candidate
+                    break
+        if executable is None:
+            message = "Không tìm thấy Wireshark. Hãy cài Wireshark hoặc thêm Wireshark vào PATH."
+            self.status_bar.message.setText(message)
+            self.toast.show_message(message, "err")
+            return
+        capture_args: list[str] = []
+        port = (
+            self.server_thread.server.bound_port
+            if self.server_thread
+            else self.port_spin.value()
+        )
+        dumpcap = os.path.join(os.path.dirname(executable), "dumpcap.exe")
+        if os.path.isfile(dumpcap):
+            try:
+                devices = subprocess.run(
+                    [dumpcap, "-D"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                devices = None
+            if devices is not None and devices.returncode == 0:
+                for line in devices.stdout.splitlines():
+                    if "loopback" in line.lower():
+                        match = re.match(r"\s*(\d+)\.", line)
+                        if match:
+                            capture_args = [
+                                "-k",
+                                "-i",
+                                match.group(1),
+                                "-f",
+                                "udp and host 127.0.0.1",
+                            ]
+                            break
+        wireshark_args = [
+            "-Y",
+            "udp && ip.addr == 127.0.0.1",
+            "-d",
+            f"udp.port=={port},tftp",
+            *capture_args,
+        ]
+        try:
+            subprocess.Popen([executable, *wireshark_args], close_fds=True)
+        except OSError as exc:
+            message = f"Không mở được Wireshark: {exc}"
+            self.status_bar.message.setText(message)
+            self.toast.show_message(message, "err")
+            return
+        message = "Wireshark đã bắt đầu capture UDP trên loopback."
+        if not capture_args:
+            message = (
+                "Wireshark đã mở — chọn Npcap Loopback Adapter, bấm Start và dùng bộ lọc "
+                "'udp && ip.addr == 127.0.0.1'."
+            )
+        self.status_bar.message.setText(message)
+        self.toast.show_message("Đã mở Wireshark", "ok")
+
     @Slot(str, str)
     def _on_log(self, level: str, text: str) -> None:
         self._log_lines.append((level, text))
@@ -825,6 +1034,8 @@ class MainWindow(QWidget):
         self._log_lines.clear()
         self.log_view.clear()
         self.log_count.setText("")
+        self.packet_table.setRowCount(0)
+        self.log_tabs.setTabText(0, "Luồng gói TFTP")
 
     @Slot()
     def _save_log(self) -> None:
@@ -908,6 +1119,27 @@ class MainWindow(QWidget):
         self.root_edit.setToolTip(text)
 
     @Slot()
+    def _refresh_lan_web_url(self) -> None:
+        address = discover_lan_ipv4()
+        self._lan_web_url = f"http://{address}:8080" if address else None
+        self.lan_web_url.setText(
+            self._lan_web_url or "Không tìm thấy IP LAN — kiểm tra kết nối mạng"
+        )
+        self.copy_lan_web_url.setEnabled(self._lan_web_url is not None)
+
+    @Slot()
+    def _copy_lan_web_url(self) -> None:
+        if self._lan_web_url is None:
+            self._refresh_lan_web_url()
+        if self._lan_web_url is None:
+            self.status_bar.message.setText("Không tìm thấy IP LAN để sao chép")
+            return
+        QApplication.clipboard().setText(self._lan_web_url)
+        self.status_bar.message.setText(
+            f"Đã sao chép {self._lan_web_url} — cần chạy web gateway để truy cập"
+        )
+
+    @Slot()
     def _open_root_folder(self) -> None:
         root = os.path.abspath(self.root_edit.text() or "files")
         if os.path.isdir(root):
@@ -934,8 +1166,12 @@ class MainWindow(QWidget):
                 enable_options=not self.no_options.isChecked(),
                 max_clients=self.max_clients_spin.value(),
                 max_file_size=self.max_size_spin.value() or None,
+                max_total_bytes=self.max_total_size_spin.value(),
+                evict_oldest=self.evict_oldest.isChecked(),
                 allow_subdirs=self.allow_subdirs.isChecked(),
                 max_requests_per_second=100 if self.low_rate.isChecked() else 1_000_000,
+                family=self.family_combo.currentText(),
+                host6=self.host6_edit.text().strip() or None,
             )
         except OSError as exc:
             self.status_bar.message.setText(f"Không tạo được server: {exc}")
@@ -958,9 +1194,12 @@ class MainWindow(QWidget):
     @Slot(int)
     def _on_server_ready(self, port: int) -> None:
         self.top_bar.set_status("ok", f"Server đang chạy · :{port}")
-        self.status_bar.message.setText(
-            f"Sẵn sàng phục vụ tại udp://{self.host_edit.text()}:{port}"
-        )
+        endpoints = []
+        if self.server is not None and self.server.bound_addresses:
+            endpoints = [f"udp://{item}" for item in self.server.bound_addresses]
+        if not endpoints:
+            endpoints = [f"udp://{self.host_edit.text()}:{port}"]
+        self.status_bar.message.setText(f"Sẵn sàng phục vụ tại {', '.join(endpoints)}")
 
     @Slot(str)
     def _on_server_failed(self, message: str) -> None:
@@ -994,12 +1233,17 @@ class MainWindow(QWidget):
         self.hero_start.setVisible(not running)
         self.hero_stop.setVisible(running)
         if running:
-            host = self.host_edit.text().strip() or "0.0.0.0"
             bound = self.server_thread.server.bound_port if self.server_thread else 0
             port = bound or self.port_spin.value()
+            endpoints = []
+            if self.server is not None and self.server.bound_addresses:
+                endpoints = [f"udp://{item}" for item in self.server.bound_addresses]
+            if not endpoints:
+                host = self.host_edit.text().strip() or "0.0.0.0"
+                endpoints = [f"udp://{host}:{port}"]
             self.hero_title.setText("Server đang chạy")
             self.hero_detail.setText(
-                f"Phục vụ {self._root_path()} trên udp://{host}:{port}"
+                f"Phục vụ {self._root_path()} trên {', '.join(endpoints)}"
             )
         else:
             self.hero_title.setText("Server đang tắt")
@@ -1011,15 +1255,19 @@ class MainWindow(QWidget):
         self._refresh_hero()
         for widget in (
             self.host_edit,
+            self.host6_edit,
+            self.family_combo,
             self.port_spin,
             self.root_edit,
             self.blksize_spin,
             self.max_clients_spin,
             self.max_size_spin,
+            self.max_total_size_spin,
             self.no_overwrite,
             self.no_options,
             self.allow_subdirs,
             self.low_rate,
+            self.evict_oldest,
         ):
             widget.setEnabled(not running)
         self.server_header.set_badge("ĐANG CHẠY" if running else "ĐÃ TẮT")
@@ -1105,9 +1353,16 @@ class MainWindow(QWidget):
 
     @Slot()
     def _use_running_server(self) -> None:
-        host = self.host_edit.text().strip() or "0.0.0.0"
-        if host in ("0.0.0.0", ""):
-            host = "127.0.0.1"
+        family = self.family_combo.currentText()
+        if family in ("ipv6", "dual"):
+            host = self.host6_edit.text().strip() or "::"
+            if host == "::":
+                host = "::1"
+            host = f"[{host}]"
+        else:
+            host = self.host_edit.text().strip() or "0.0.0.0"
+            if host in ("0.0.0.0", ""):
+                host = "127.0.0.1"
         port = self.server_thread.server.bound_port if self.server else self.port_spin.value()
         self.target_edit.setText(f"{host}:{port}")
 

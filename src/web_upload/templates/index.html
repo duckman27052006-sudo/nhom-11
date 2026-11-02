@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <meta name="max-file-size" content="{{ max_file_size }}">
+    <meta name="theme-color" content="#17211f">
+    <title>Gửi tệp · LAN Drop</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='upload.css') }}">
+    <script src="{{ url_for('static', filename='upload.js') }}" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="LAN Drop, trang chủ">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>LAN<span class="brand-light">DROP</span></span>
+      </a>
+      <div class="network-state"><span class="state-dot"></span> MẠNG NỘI BỘ</div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">GỬI TỆP QUA TFTP · NỘI BỘ</p>
+        <h1 id="page-title">Gửi file.<br><span>Không cần cài đặt.</span></h1>
+        <p class="intro-copy">Chọn tệp từ thiết bị của bạn. Tệp sẽ được chuyển bằng TFTP và lưu trên máy chủ.</p>
+      </section>
+
+      <section class="upload-panel" aria-label="Khu vực gửi tệp">
+        <label class="dropzone" id="dropzone" for="file-input" tabindex="0">
+          <input id="file-input" type="file" multiple>
+          <span class="drop-glyph" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none">
+              <path d="M24 31V8m0 0-9 9m9-9 9 9M9 29v10h30V29" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="drop-title">Thả tệp vào đây</span>
+          <span class="drop-subtitle">hoặc <span class="browse-link">chọn từ thiết bị</span></span>
+          <span class="drop-limit">Tối đa <strong id="size-limit">{{ "%.1f"|format(max_file_size / 1048576) }} MB</strong> mỗi tệp</span>
+        </label>
+
+        <div class="selection" id="selection" hidden>
+          <div class="selection-heading">
+            <span class="section-label">TỆP ĐÃ CHỌN</span>
+            <button class="text-button" id="clear-files" type="button">Xóa danh sách</button>
+          </div>
+          <ul class="file-list" id="file-list" aria-live="polite"></ul>
+          <button class="send-button" id="send-button" type="button">
+            <span>Gửi lên máy chủ</span><span aria-hidden="true">↗</span>
+          </button>
+        </div>
+
+        <div class="status-message" id="status-message" role="status" aria-live="polite" hidden></div>
+      </section>
+
+      <footer class="privacy-note">
+        <span class="lock-mark" aria-hidden="true">⌑</span>
+        <p><strong>Chỉ dùng trong mạng nội bộ.</strong> Không gửi tệp nhạy cảm qua mạng không tin cậy. Người có quyền truy cập mạng này có thể gửi tệp lên máy chủ.</p>
+      </footer>
+    </main>
+
+    <div class="page-index" aria-hidden="true">TRANSFER DESK <span>·</span> 01</div>
+  </body>
+</html>

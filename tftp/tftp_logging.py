@@ -6,6 +6,8 @@ import logging
 import logging.handlers
 import sys
 
+from . import enable_utf8_console
+
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUPS = 5
 
@@ -19,6 +21,9 @@ def setup_logging(
     stream=sys.stderr,
 ) -> list[logging.Handler]:
     """Cấu hình root logger; trả về handler đã gắn để test có thể dọn."""
+    # Console Windows mặc định cp1252: không đổi sang UTF-8 thì log tiếng Việt
+    # (kể cả thông báo lỗi của chính project) có thể ném UnicodeEncodeError.
+    enable_utf8_console()
     level = logging.DEBUG if verbose else logging.INFO
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S"

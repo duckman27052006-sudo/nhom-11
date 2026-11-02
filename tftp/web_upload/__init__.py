@@ -373,7 +373,10 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
 
 def main(argv=None) -> int:
     enable_utf8_console()
-    parser = argparse.ArgumentParser(description="Cổng file và chat TFTP trong LAN")
+    parser = argparse.ArgumentParser(
+        prog="python -m tftp.web_upload",
+        description="Cổng file và chat TFTP trong LAN",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--root", default="files", help="Cùng root với TFTP server")

@@ -33,7 +33,10 @@ class LogBridge(QObject):
             self.message.connect(callback)
         self._handler = QtLogHandler(self.message, self.packet, min_level)
         logging.getLogger().addHandler(self._handler)
-        logging.getLogger().setLevel(logging.DEBUG)
+        # Chỉ mở DEBUG cho logger của package. Trước đây code set root logger
+        # lên DEBUG, kéo theo log của mọi thư viện khác (dù NameFilter bỏ đi
+        # thì record vẫn bị tạo và format).
+        logging.getLogger("tftp").setLevel(logging.DEBUG)
         return self._handler
 
     def detach(self) -> None:

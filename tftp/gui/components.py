@@ -8,7 +8,7 @@ hành vẽ (input, bảng, checkbox) lấy màu từ `QPalette` của app.
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -33,6 +33,45 @@ from . import motion, theme
 RADIUS_CARD = 10
 RADIUS_TILE = 8
 RADIUS_INPUT = 8
+
+
+# ----------------------------------------------------------------- elided ---
+class ElidedLabel(QLabel):
+    """QLabel một dòng, tự cắt bằng "…" khi không đủ chỗ.
+
+    `QLabel` không word-wrap có `minimumSizeHint` bằng **toàn bộ** độ dài chuỗi,
+    nên một dòng log hay đường dẫn dài sẽ đẩy cả trang rộng hơn cửa sổ và phần
+    bên phải bị cắt mất (đúng lỗi thấy ở trang Tổng quan với log server). Ở đây
+    label không đòi chiều rộng (`Ignored`), còn chuỗi hiển thị được elide theo
+    chiều rộng thật; chuỗi đầy đủ vẫn xem được qua tooltip.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._apply_elided()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - tên do Qt đặt
+        self._full_text = text
+        self.setToolTip(text)
+        self._apply_elided()
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - tên do Qt đặt
+        super().resizeEvent(event)
+        self._apply_elided()
+
+    def _apply_elided(self) -> None:
+        width = max(0, self.width())
+        metrics = QFontMetrics(self.font())
+        super().setText(
+            metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight, width)
+            if width > 0
+            else self._full_text
+        )
 
 
 # ------------------------------------------------------------------ surface ---
@@ -454,7 +493,7 @@ class ActivityFeed(QFrame):
         layout.setSpacing(5)
         self._labels: list[QLabel] = []
         for _ in range(lines):
-            label = QLabel("")
+            label = ElidedLabel("")
             label.setFont(theme.font(8.5, mono=True))
             label.setVisible(False)
             layout.addWidget(label)

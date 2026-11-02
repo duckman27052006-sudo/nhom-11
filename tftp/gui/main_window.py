@@ -21,10 +21,12 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
+from typing import cast
 
-from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
+from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -51,7 +53,8 @@ from .. import __version__
 from ..tftp_client import TftpClient, _parse_server
 from ..tftp_config import DEFAULT_MAX_TOTAL_BYTES
 from ..tftp_errors import TftpError
-from ..tftp_server import TftpServer
+from ..tftp_net import FamilyMode
+from ..tftp_server import TftpServer, is_servable_name
 from . import motion, theme
 from .components import (
     ActionTile,
@@ -62,6 +65,7 @@ from .components import (
     ChevronComboBox,
     DataTable,
     DropZone,
+    ElidedLabel,
     ErrorBanner,
     Field,
     FilePicker,
@@ -143,10 +147,13 @@ class ServerThread(QThread):
 
     def run(self) -> None:  # noqa: D102
         try:
-            self.ready.emit(self.server.bound_port)
-            self.server.serve_forever()
+            # `ready` chỉ phát SAU khi listener đã bind xong, nhờ vậy GUI không
+            # báo "đang chạy" trước khi server thật sự phục vụ được.
+            self.server.serve_forever(on_ready=self.ready.emit)
         except OSError as exc:
             self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - lỗi bất ngờ vẫn phải báo lên UI
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class TransferWorker(QObject):
@@ -257,7 +264,9 @@ class StatusBar(Surface):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(24, 0, 24, 0)
         layout.setSpacing(12)
-        self.message = QLabel("Sẵn sàng — chọn file để bắt đầu")
+        # Elided: thông báo lỗi có thể chứa đường dẫn dài; QLabel thường sẽ
+        # đẩy cả dải trạng thái rộng ra ngoài cửa sổ.
+        self.message = ElidedLabel("Sẵn sàng — chọn file để bắt đầu")
         self.message.setFont(theme.font(8, mono=True))
         muted(self.message, "text_muted")
         layout.addWidget(self.message, 1)
@@ -286,6 +295,7 @@ class MainWindow(QWidget):
         self._intro_fade: QPropertyAnimation | None = None
         self._log_lines: list[tuple[str, str]] = []
         self._close_pending = False
+        self._stopping = False
 
         self.log_bridge = LogBridge(self)
         self.uptime = motion.Ticker(1000, self)
@@ -763,8 +773,9 @@ class MainWindow(QWidget):
         self.allow_subdirs = QCheckBox("Cho phép thư mục con")
         self.low_rate = QCheckBox("Giới hạn 100 request/s")
         self.low_rate.setChecked(True)
-        self.evict_oldest = QCheckBox("Tự xóa file cũ nhất khi đầy quota")
-        self.evict_oldest.setChecked(True)
+        self.evict_oldest = QCheckBox("Xoá file cũ nhất khi đầy quota (nguy hiểm)")
+        # Mặc định TẮT: tự xoá dữ liệu của người dùng phải là lựa chọn chủ động.
+        self.evict_oldest.setChecked(False)
         for box in (
             self.no_overwrite,
             self.no_options,
@@ -900,8 +911,10 @@ class MainWindow(QWidget):
 
     @Slot()
     def _open_wireshark(self) -> None:
-        executable = shutil.which("wireshark") or shutil.which("Wireshark")
-        if executable is None:
+        executable = (
+            shutil.which("wireshark") or shutil.which("Wireshark") or shutil.which("tshark")
+        )
+        if executable is None and sys.platform == "win32":
             for program_files in (
                 os.environ.get("ProgramFiles", r"C:\Program Files"),
                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
@@ -916,36 +929,35 @@ class MainWindow(QWidget):
             self.toast.show_message(message, "err")
             return
         capture_args: list[str] = []
-        port = (
-            self.server_thread.server.bound_port
-            if self.server_thread
-            else self.port_spin.value()
-        )
-        dumpcap = os.path.join(os.path.dirname(executable), "dumpcap.exe")
-        if os.path.isfile(dumpcap):
-            try:
-                devices = subprocess.run(
-                    [dumpcap, "-D"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                devices = None
-            if devices is not None and devices.returncode == 0:
-                for line in devices.stdout.splitlines():
-                    if "loopback" in line.lower():
-                        match = re.match(r"\s*(\d+)\.", line)
-                        if match:
-                            capture_args = [
-                                "-k",
-                                "-i",
-                                match.group(1),
-                                "-f",
-                                "udp and host 127.0.0.1",
-                            ]
-                            break
+        port = self._bound_port()
+        if sys.platform == "win32":
+            # Npcap đặt dumpcap.exe cạnh Wireshark.exe; trên Linux/macOS tên
+            # thiết bị loopback khác nên không đoán bừa, để người dùng chọn.
+            dumpcap = os.path.join(os.path.dirname(executable), "dumpcap.exe")
+            if os.path.isfile(dumpcap):
+                try:
+                    devices = subprocess.run(
+                        [dumpcap, "-D"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    devices = None
+                if devices is not None and devices.returncode == 0:
+                    for line in devices.stdout.splitlines():
+                        if "loopback" in line.lower():
+                            match = re.match(r"\s*(\d+)\.", line)
+                            if match:
+                                capture_args = [
+                                    "-k",
+                                    "-i",
+                                    match.group(1),
+                                    "-f",
+                                    "udp and host 127.0.0.1",
+                                ]
+                                break
         wireshark_args = [
             "-Y",
             "udp && ip.addr == 127.0.0.1",
@@ -984,7 +996,9 @@ class MainWindow(QWidget):
         if self.log_filter.currentIndex() != 0:
             self._rebuild_log()
         if level in ("ERROR", "CRITICAL"):
-            self.status_bar.message.setText(text[-90:])
+            # ElidedLabel tự cắt bằng "…" theo bề rộng thật; cắt tay 90 ký tự
+            # cuối chỉ giữ phần đuôi nên mất chính phần mô tả lỗi.
+            self.status_bar.message.setText(text)
 
     @staticmethod
     def _log_color(level: str, tokens: dict[str, str]) -> str:
@@ -1157,10 +1171,22 @@ class MainWindow(QWidget):
     @Slot()
     def _open_root_folder(self) -> None:
         root = os.path.abspath(self.root_edit.text() or "files")
-        if os.path.isdir(root):
-            os.startfile(root)  # noqa: S606 - mở thư mục cho người dùng
-        else:
+        if not os.path.isdir(root):
             self.status_bar.message.setText(f"Không tồn tại thư mục: {root}")
+            return
+        # QDesktopServices chạy trên mọi nền tảng; `os.startfile` chỉ có trên
+        # Windows nên bản trước sẽ ném AttributeError trên Linux/macOS.
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(root)):
+            self.status_bar.message.setText(f"Không mở được thư mục: {root}")
+
+    def _bound_port(self) -> int:
+        """Port listener thật nếu đã bind, ngược lại là port đang cấu hình."""
+        thread = self.server_thread
+        if thread is not None and thread.server.bound_port:
+            return thread.server.bound_port
+        if self.server is not None and self.server.bound_port:
+            return self.server.bound_port
+        return self.port_spin.value()
 
     @Slot()
     def _start_server(self) -> None:
@@ -1185,22 +1211,24 @@ class MainWindow(QWidget):
                 evict_oldest=self.evict_oldest.isChecked(),
                 allow_subdirs=self.allow_subdirs.isChecked(),
                 max_requests_per_second=100 if self.low_rate.isChecked() else 1_000_000,
-                family=self.family_combo.currentText(),
+                family=cast(FamilyMode, self.family_combo.currentText()),
                 host6=self.host6_edit.text().strip() or None,
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self.status_bar.message.setText(f"Không tạo được server: {exc}")
             self.top_bar.set_status("err", "Lỗi cấu hình")
             return
 
         self.server = server
+        self._stopping = False
         self.server_thread = ServerThread(server, self)
         self.server_thread.ready.connect(self._on_server_ready)
         self.server_thread.failed.connect(self._on_server_failed)
+        self.server_thread.finished.connect(self._on_server_stopped)
         self.server_thread.start()
         self._set_running(True)
         self.uptime.start()
-        self.top_bar.set_status("ok", "Server đang chạy")
+        self.top_bar.set_status("warn", "Đang khởi động")
         port = self.port_spin.value()
         self.status_bar.message.setText(f"Đang lắng nghe trên {server.host}:{port}")
         self._refresh_files(quiet=True)
@@ -1224,6 +1252,7 @@ class MainWindow(QWidget):
         # nút "Khởi động" bị ẩn và mọi lần bấm sau đều return ngay.
         thread, self.server_thread = self.server_thread, None
         self.server = None
+        self._stopping = False
         if thread is not None:
             thread.quit()
             thread.wait(3000)
@@ -1233,23 +1262,56 @@ class MainWindow(QWidget):
 
     @Slot()
     def _stop_server(self) -> None:
+        """Yêu cầu dừng server — không chặn UI.
+
+        `serve_forever()` tự gọi `shutdown()` trong `finally` khi cờ stop được
+        bật, nên chỉ cần đánh thức listener rồi chờ tín hiệu `finished`. Trước
+        đây hàm này gọi thẳng `server.shutdown()` trên thread giao diện, join
+        từng phiên (tối đa 5s/phiên) làm cửa sổ đứng hình khi tắt.
+        """
         if self.server is None:
             self.status_bar.message.setText("Server đang tắt")
             return
+        if self._stopping:
+            return
+        self._stopping = True
         self.status_bar.message.setText("Đang dừng server...")
         self.top_bar.set_status("warn", "Đang dừng")
-        server, thread = self.server, self.server_thread
+        self._refresh_hero()
+        self.server.request_stop()
+
+    @Slot()
+    def _on_server_stopped(self) -> None:
+        """Chạy khi `ServerThread` kết thúc (thread đã tự shutdown xong)."""
+        if self.server is None and not self._stopping:
+            # Bind thất bại: `_on_server_failed` đã dọn state và báo lỗi, không
+            # được ghi đè thông báo đó bằng "Server đã dừng".
+            return
+        thread, self.server_thread = self.server_thread, None
         self.server = None
-        self.server_thread = None
-        server.shutdown()
+        self._stopping = False
         if thread is not None:
             thread.quit()
-            thread.wait(3000)
+            thread.wait(2000)
         self.uptime.stop()
-        self._set_running(False)
         self.hero_clock.setText("00:00")
+        self._set_running(False)
         self.top_bar.set_status("idle", "Server đang tắt")
         self.status_bar.message.setText("Server đã dừng")
+
+    def _stop_server_blocking(self) -> None:
+        """Dừng server và chờ thread kết thúc — chỉ dùng khi đóng cửa sổ."""
+        if self.server is None:
+            return
+        self._stopping = True
+        self.server.request_stop()
+        thread = self.server_thread
+        if thread is not None:
+            thread.quit()
+            thread.wait(5000)
+        self.server = None
+        self.server_thread = None
+        self._stopping = False
 
     def _refresh_hero(self) -> None:
         """Vẽ lại hero theo trạng thái server: một nút chính + một nút phụ."""
@@ -1257,15 +1319,16 @@ class MainWindow(QWidget):
         self.hero_start.setVisible(not running)
         self.hero_stop.setVisible(running)
         if running:
-            bound = self.server_thread.server.bound_port if self.server_thread else 0
-            port = bound or self.port_spin.value()
+            port = self._bound_port()
             endpoints = []
             if self.server is not None and self.server.bound_addresses:
                 endpoints = [f"udp://{item}" for item in self.server.bound_addresses]
             if not endpoints:
                 host = self.host_edit.text().strip() or "0.0.0.0"
                 endpoints = [f"udp://{host}:{port}"]
-            self.hero_title.setText("Server đang chạy")
+            self.hero_title.setText(
+                "Server đang dừng" if self._stopping else "Server đang chạy"
+            )
             self.hero_detail.setText(
                 f"Phục vụ {self._root_path()} trên {', '.join(endpoints)}"
             )
@@ -1302,13 +1365,21 @@ class MainWindow(QWidget):
         return os.path.abspath(self.root_edit.text().strip() or "files")
 
     def _scan_files(self) -> list[tuple[str, int, float]]:
+        """File trong thư mục gốc mà server thật sự phục vụ được.
+
+        Dùng đúng bộ lọc của `TftpServer.resolve_path` (qua `is_servable_name`)
+        để bảng không hiện file có dấu tiếng Việt, file ẩn hay tên không hợp lệ
+        — những thứ bấm vào sẽ chỉ nhận lỗi.
+        """
         root = self._root_path()
         if not os.path.isdir(root):
             return []
         entries = []
         for name in os.listdir(root):
+            if not is_servable_name(name):
+                continue
             full = os.path.join(root, name)
-            if not os.path.isfile(full) or name.endswith(".part"):
+            if not os.path.isfile(full):
                 continue
             try:
                 stat = os.stat(full)
@@ -1317,6 +1388,21 @@ class MainWindow(QWidget):
             entries.append((name, stat.st_size, stat.st_mtime))
         entries.sort(key=lambda item: item[0].lower())
         return entries
+
+    def _skipped_files(self) -> int:
+        """Số tên trong thư mục gốc mà server không phục vụ được (để báo UI)."""
+        root = self._root_path()
+        if not os.path.isdir(root):
+            return 0
+        try:
+            names = os.listdir(root)
+        except OSError:
+            return 0
+        return sum(
+            1
+            for name in names
+            if os.path.isfile(os.path.join(root, name)) and not is_servable_name(name)
+        )
 
     @Slot()
     def _refresh_files(self, quiet: bool = False) -> None:
@@ -1338,7 +1424,11 @@ class MainWindow(QWidget):
             )
 
         total = sum(item[1] for item in entries)
-        self.files_hint.setText(f"{len(entries)} file · {human_size(total)}")
+        skipped = self._skipped_files()
+        hint = f"{len(entries)} file · {human_size(total)}"
+        if skipped:
+            hint += f" · bỏ qua {skipped} tên không phục vụ được"
+        self.files_hint.setText(hint)
         self.files_header.set_badge(f"{len(entries)} mục")
         self.stat_files.set_number(len(entries))
         self.stat_size.set_text(human_size(total))
@@ -1387,8 +1477,7 @@ class MainWindow(QWidget):
             host = self.host_edit.text().strip() or "0.0.0.0"
             if host in ("0.0.0.0", ""):
                 host = "127.0.0.1"
-        port = self.server_thread.server.bound_port if self.server else self.port_spin.value()
-        self.target_edit.setText(f"{host}:{port}")
+        self.target_edit.setText(f"{host}:{self._bound_port()}")
 
     @Slot(QTableWidgetItem)
     def _on_file_activated(self, item: QTableWidgetItem) -> None:
@@ -1614,12 +1703,12 @@ class MainWindow(QWidget):
             )
             event.ignore()
             return
+        # Đóng cửa sổ là lúc duy nhất được phép chờ đồng bộ.
         self._shutdown()
         super().closeEvent(event)
 
     def _shutdown(self) -> None:
-        if self.server is not None:
-            self._stop_server()
+        self._stop_server_blocking()
         thread = self.transfer_thread
         if thread is not None:
             thread.quit()

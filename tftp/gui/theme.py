@@ -228,7 +228,11 @@ def apply_input_palette(widget) -> None:
     """
     t = current_tokens()
     pal = widget.palette()
-    pal.setColor(QPalette.ColorRole.Base, QColor(t["surface"]))
+    # Fusion vẽ khung ô nhập bằng `Window` và tô nền bằng `Base`. Nếu cả hai
+    # trùng màu card thì theme tối (nền #131315) cho ra khung #0E0E0F — gần như
+    # vô hình, không biết ô nhập nằm ở đâu. Dùng `surface_alt` cho `Base` để ô
+    # nhập nổi khỏi card, giữ nguyên hệ token.
+    pal.setColor(QPalette.ColorRole.Base, QColor(t["surface_alt"]))
     pal.setColor(QPalette.ColorRole.Text, QColor(t["text"]))
     pal.setColor(QPalette.ColorRole.Window, QColor(t["surface"]))
     pal.setColor(QPalette.ColorRole.Button, QColor(t["surface"]))
@@ -239,4 +243,7 @@ def apply_input_palette(widget) -> None:
     pal.setColor(QPalette.ColorRole.Mid, QColor(t["border_strong"]))
     pal.setColor(QPalette.ColorRole.Dark, QColor(t["border"]))
     pal.setColor(QPalette.ColorRole.Light, QColor(t["surface"]))
+    # Fusion vẽ khung QLineEdit/QSpinBox bằng `Shadow`; để nguyên thì theme tối
+    # dùng #000000 và khung gần như trùng nền (không thấy được ô nhập ở đâu).
+    pal.setColor(QPalette.ColorRole.Shadow, QColor(t["border_strong"]))
     widget.setPalette(pal)

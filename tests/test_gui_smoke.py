@@ -6,7 +6,9 @@ Chỉ chạy khi có PySide6; CI không cài extras [gui] nên module tự skip.
 from __future__ import annotations
 
 import os
+import socket
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -86,6 +88,67 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertIsNone(self.window.server_thread)
         self.assertTrue(self.window.hero_start.isVisible())
         self.assertIn("không chạy được", self.window.status_bar.message.text())
+
+    def test_file_table_hides_names_the_server_cannot_serve(self) -> None:
+        # GUI từng liệt kê cả file có dấu tiếng Việt và file ẩn; bấm vào chỉ
+        # nhận lỗi vì server/client không phục vụ được những tên đó.
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "ok.txt").write_text("x", encoding="utf-8")
+            Path(root, "báo-cáo.pdf").write_bytes(b"x")
+            Path(root, ".hidden").write_text("x", encoding="utf-8")
+            Path(root, "CON").write_text("x", encoding="utf-8")
+            self.window.root_edit.setText(root)
+            self.window._refresh_files(quiet=True)
+            pump(self.app)
+            table = self.window.files_table.table
+            names = [table.item(row, 0).text() for row in range(table.rowCount())]
+            self.assertEqual(names, ["ok.txt"])
+            self.assertIn("bỏ qua 3", self.window.files_hint.text())
+
+    def test_start_and_stop_server_without_blocking(self) -> None:
+        # `_stop_server` phải chỉ đánh thức listener rồi trả về ngay; việc
+        # shutdown/join diễn ra trong ServerThread và kết thúc bằng tín hiệu.
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "a.txt").write_text("x", encoding="utf-8")
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+
+            self.window.host_edit.setText("127.0.0.1")
+            self.window.port_spin.setValue(port)
+            self.window.root_edit.setText(root)
+            self.window._start_server()
+            pump(self.app, 1.0)
+            self.assertIsNotNone(self.window.server)
+            # Form cấu hình phải khoá lại khi server đang chạy (đổi giá trị
+            # không có tác dụng gì cho tới lần khởi động sau).
+            self.assertFalse(self.window.root_edit.isEnabled())
+            self.assertFalse(self.window.port_spin.isEnabled())
+
+            self.window._stop_server()
+            deadline = time.monotonic() + 5.0
+            while self.window.server is not None and time.monotonic() < deadline:
+                pump(self.app, 0.02)
+            self.assertIsNone(self.window.server)
+            self.assertIsNone(self.window.server_thread)
+            self.assertIn("đã dừng", self.window.status_bar.message.text())
+            self.assertTrue(self.window.root_edit.isEnabled())
+
+    def test_long_log_line_is_elided_and_does_not_widen_page(self) -> None:
+        # QLabel không word-wrap có minimumSizeHint bằng cả chuỗi: một dòng log
+        # dài từng đẩy trang Tổng quan rộng hơn cửa sổ và cắt mất phần bên phải.
+        long_line = "L" * 500
+        self.window._on_log("INFO", long_line)
+        pump(self.app, 0.1)
+        label = next(
+            item for item in self.window.activity._labels if item.full_text() == long_line
+        )
+        self.assertTrue(label.text().endswith("…"), label.text())
+        self.assertEqual(label.toolTip(), long_line)
+        # Không có ElidedLabel, QLabel đòi ~3000 px cho 500 ký tự và cả trang
+        # rộng ra ngoài cửa sổ; có nó thì nhãn chỉ đòi đúng bề rộng đang có.
+        self.assertLess(label.minimumSizeHint().width(), self.window.width())
 
 
 if __name__ == "__main__":

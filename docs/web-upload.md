@@ -15,7 +15,7 @@ python -m pip install -e ".[web]"
 Terminal thứ nhất:
 
 ```powershell
-python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files --no-overwrite
+python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files
 ```
 
 Terminal thứ hai, chạy thử trên cùng máy:
@@ -54,15 +54,18 @@ proxy làm peer chung nếu muốn giữ ACL cho từng client.
 | `--port` | `8080` | TCP port web |
 | `--allowed-network` | loopback khi bind loopback | Subnet được phép truy cập |
 | `--root` | `files` | Cùng thư mục root với TFTP server |
-| `--tftp-server` | `127.0.0.1:6969` | IPv4 hoặc hostname và UDP port TFTP |
+| `--tftp-server` | `127.0.0.1:6969` | IPv4, hostname hoặc `[IPv6]:port` TFTP |
 | `--data-dir` | `web-data` | Dữ liệu tài khoản/phiên/chat, nằm ngoài root TFTP |
 | `--max-file-size` | `100` | MiB tối đa mỗi file, cả tải và gửi |
 | `--secure-cookie` | tắt | Chỉ dùng nếu phục vụ web qua HTTPS |
+| `--max-concurrent-uploads` | `4` | Tổng lượt tải/gửi đồng thời |
+| `--threads` | `8` | Số worker Waitress |
 
 Chạy hai tiến trình cùng máy với cùng root. TFTP không hỗ trợ liệt kê file, nên
 gateway đọc danh sách từ thư mục root. Nếu đổi root ở một bên phải đổi bên còn lại.
-TFTP client hiện dùng IPv4; web có thể bind IPv6 private/loopback nhưng đích TFTP
-vẫn cần IPv4 hoặc hostname phân giải thành IPv4.
+TFTP client hỗ trợ IPv4/IPv6. Với mạng IPv6 private, có thể bind web vào IP ULA,
+cho phép subnet tương ứng và dùng `--tftp-server "[::1]:6969"` khi TFTP cũng
+đang lắng nghe trên IPv6.
 
 ## Tài khoản và chat
 
@@ -89,7 +92,7 @@ root; không cho duyệt thư mục con, symlink, tên đường dẫn hoặc fi
 Lõi TFTP yêu cầu tên ASCII: file upload có dấu được đổi sang tên không dấu
 (ví dụ `Đề tài.txt` → `De_tai.txt`) và giao diện báo tên đã lưu. File được quản lý
 chép trực tiếp vào root cần có tên ASCII để xuất hiện trong danh sách web.
-Giữ quyền ghi đè/giới hạn của TFTP server; khuyến nghị `--no-overwrite` như lệnh mẫu.
+Giữ quyền ghi đè/giới hạn của TFTP server; mặc định không ghi đè file trùng tên; chỉ bật `--overwrite` khi cần.
 Không có chức năng xóa file trên web. File tải về luôn là attachment, không mở
 HTML do người dùng gửi trong origin của ứng dụng.
 

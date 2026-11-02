@@ -23,7 +23,7 @@ jobs:
         run: >-
           python -m py_compile src/tftp_packet.py src/tftp_errors.py
           src/tftp_metrics.py src/tftp_server.py src/tftp_client.py
-          src/web_store.py src/web_upload.py
+          src/web_store.py src/web_upload/__init__.py
       - name: Lint
         run: |
           python -m pip install --upgrade ruff

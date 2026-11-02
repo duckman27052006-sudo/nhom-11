@@ -17,6 +17,7 @@ class LogBridge(QObject):
     """Phát tín hiệu `(mức, dòng log)` từ bất kỳ thread nào."""
 
     message = Signal(str, str)  # (level, "HH:MM:SS  message")
+    packet = Signal(float, str, str)  # (timestamp, flow, description)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -30,7 +31,7 @@ class LogBridge(QObject):
         """Gắn handler vào logging root, trả về handler để tháo ra sau."""
         if callback is not None:
             self.message.connect(callback)
-        self._handler = QtLogHandler(self.message, min_level)
+        self._handler = QtLogHandler(self.message, self.packet, min_level)
         logging.getLogger().addHandler(self._handler)
         logging.getLogger().setLevel(logging.DEBUG)
         return self._handler
@@ -45,20 +46,40 @@ class LogBridge(QObject):
 class QtLogHandler(logging.Handler):
     """logging.Handler phát record qua Qt signal, chỉ giữ log của tftp.*."""
 
-    def __init__(self, signal, level: int = logging.INFO) -> None:
-        super().__init__(level)
+    def __init__(self, signal, packet_signal, level: int = logging.INFO) -> None:
+        super().__init__(logging.DEBUG)
         self._signal = signal
+        self._packet_signal = packet_signal
+        self._minimum_level = level
         self.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
         self.addFilter(NameFilter())
 
     def emit(self, record: logging.LogRecord) -> None:
+        text = record.getMessage()
+        if (
+            record.levelno == logging.DEBUG
+            and record.name in {"tftp.client", "tftp.server"}
+            and text.startswith(("-> ", "<- "))
+        ):
+            client_sending = text.startswith("-> ")
+            if record.name == "tftp.client":
+                flow = "Client → Server" if client_sending else "Server → Client"
+            else:
+                flow = "Server → Client" if client_sending else "Client → Server"
+            try:
+                self._packet_signal.emit(record.created, flow, text[3:])
+            except RuntimeError:
+                pass
+            return
+        if record.levelno < self._minimum_level:
+            return
         try:
-            text = self.format(record)
+            formatted = self.format(record)
         except Exception:  # noqa: BLE001 - handler không được phép ném lỗi
             self.handleError(record)
             return
         try:
-            self._signal.emit(record.levelname, text)
+            self._signal.emit(record.levelname, formatted)
         except RuntimeError:
             # App đã đóng trong lúc thread khác đang log.
             pass

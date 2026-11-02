@@ -406,7 +406,9 @@ class TestNoResourceLeak(unittest.TestCase):
     def test_repeated_cycles_keep_server_clean(self):
         payload = make_payload(24_000, seed=71)
         threads_before = len(threading.enumerate())
-        with ServerHarness(timeout=5.0, retries=5, max_clients=64) as srv:
+        with ServerHarness(
+            timeout=5.0, retries=5, max_clients=64, allow_overwrite=True
+        ) as srv:
             with tempfile.TemporaryDirectory() as out:
                 source = str(Path(out) / "cycle.bin")
                 Path(source).write_bytes(payload)

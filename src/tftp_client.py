@@ -19,12 +19,21 @@ import logging
 import os
 import socket
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import DEFAULT_PORT, enable_utf8_console, tftp_errors
 from .tftp_metrics import Metrics
+from .tftp_net import (
+    FamilyMode,
+    ResolvedAddress,
+    format_endpoint,
+    parse_host_port,
+    resolve_addresses,
+    same_ip,
+)
 from .tftp_packet import (
     ACK,
     DATA,
@@ -61,8 +70,8 @@ ProgressFn = Callable[[int, int | None], None]
 class _ClientState:
     """State của một lượt truyền (2.3): thay Dict[str, object] dễ KeyError."""
 
-    tid: tuple[str, int] | None = None
-    target: tuple[str, int] = ("", 0)
+    tid: tuple | None = None
+    target: tuple = ("", 0)
 
 
 class TftpClient:
@@ -78,20 +87,38 @@ class TftpClient:
         blksize: int = DEFAULT_BLKSIZE,
         mode: str = "octet",
         use_options: bool = True,
+        family: FamilyMode = "auto",
+        overwrite: bool = False,
+        total_timeout: float | None = None,
+        cancel_event=None,
         metrics: Metrics | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        if family not in ("auto", "ipv4", "ipv6"):
+            raise ValueError(f"family không hợp lệ: {family!r}")
+        if timeout <= 0:
+            raise ValueError("timeout phải lớn hơn 0")
+        if not 8 <= blksize <= 65464:
+            raise ValueError("blksize phải trong khoảng 8..65464")
+        if total_timeout is not None and total_timeout <= 0:
+            raise ValueError("total_timeout phải lớn hơn 0")
         self.host = host
         self.port = port
-        self.timeout = timeout
+        self.timeout = float(timeout)
         self.retries = max(1, retries)
-        self.blksize = max(8, blksize)
+        self.blksize = blksize
         self.mode = mode
         self.use_options = use_options
+        self.family = family
+        self.overwrite = overwrite
+        self.total_timeout = total_timeout
+        self.cancel_event = cancel_event
         self.log = logger or LOG
         self.metrics = metrics if metrics is not None else Metrics("tftp.client")
+        self._resolved: list[ResolvedAddress] | None = None
         self._state = _ClientState(target=(host, port))
         self._sent_at = 0.0
+        self._deadline: float | None = None
 
     # ------------------------------------------------------------ tiện ích ---
     def _info(self, message: str) -> None:
@@ -103,10 +130,28 @@ class TftpClient:
     def _warn(self, message: str) -> None:
         self.log.warning(message)
 
-    def _open_socket(self, timeout: float | None = None) -> socket.socket:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def _candidates(self) -> list[ResolvedAddress]:
+        if self._resolved is None:
+            self._resolved = resolve_addresses(self.host, self.port, self.family)
+        return self._resolved
+
+    def _open_socket(
+        self, candidate: ResolvedAddress, timeout: float | None = None
+    ) -> socket.socket:
+        sock = socket.socket(candidate.family, socket.SOCK_DGRAM)
+        if candidate.family == socket.AF_INET6:
+            try:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            except OSError:
+                pass
         sock.settimeout(self.timeout if timeout is None else timeout)
         return sock
+
+    def _check_deadline(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise tftp_errors.TftpTimeout("đã hủy truyền theo yêu cầu")
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise tftp_errors.TftpTimeout("vượt quá thời gian tổng cho phép của transfer")
 
     def _requested_options(self, *, for_upload: bool, size: int | None = None) -> dict[str, str]:
         """Option gửi kèm RRQ/WRQ (1.3: tsize luôn được hỏi/gửi)."""
@@ -170,13 +215,13 @@ class TftpClient:
             except TimeoutError:
                 return None
             if tid is None:
-                if source[0] != self.host:
+                if not same_ip(source, self._state.target):
                     self.metrics.incr("packets.foreign_host")
                     self._warn(f"bỏ qua gói từ host lạ {source[0]}")
                     continue
                 tid = source
                 self._state.tid = tid
-                self._info(f"server trả lời từ TID mới {tid[0]}:{tid[1]}")
+                self._info(f"server trả lời từ TID mới {format_endpoint(tid[0], tid[1])}")
                 self._state.target = tid
             elif source != tid:
                 self.metrics.incr("packets.foreign_tid")
@@ -212,6 +257,7 @@ class TftpClient:
         stale = MAX_STALE_PACKETS
         self._send(sock, packet)
         while True:
+            self._check_deadline()
             reply = self._recv_valid(sock, accept_ops)
             if reply is None:
                 retries -= 1
@@ -239,8 +285,8 @@ class TftpClient:
             self._warn(f"{describe(reply)} không mong đợi: gửi lại {describe(packet)}")
             self._send(sock, packet, retransmit=True)
 
-    def _new_state(self) -> None:
-        self._state = _ClientState(tid=None, target=(self.host, self.port))
+    def _new_state(self, candidate: ResolvedAddress) -> None:
+        self._state = _ClientState(tid=None, target=candidate.sockaddr)
 
     def _log_block(self, block: int, size: int, total: int) -> None:
         if block <= 3 or block % 50 == 0:
@@ -259,6 +305,9 @@ class TftpClient:
     def _run_transfer(self, kind: str, action: Callable[[], str]) -> str:
         """Bọc một lượt truyền để đo thời gian, đếm kết quả và phân loại lỗi."""
         self.metrics.incr(f"transfers.started.{kind}")
+        self._deadline = (
+            time.monotonic() + self.total_timeout if self.total_timeout is not None else None
+        )
         try:
             with self.metrics.span(f"transfer.duration.{kind}", fail_counter=kind):
                 result = action()
@@ -285,18 +334,57 @@ class TftpClient:
         )
 
     def _download(self, remote: str, local: str, *, progress: ProgressFn | None = None) -> str:
-        self._new_state()
-        sock = self._open_socket()
-        started = time.monotonic()
+        if not self.overwrite and os.path.exists(local):
+            raise FileExistsError(f"file đích đã tồn tại: {local} (dùng overwrite=True để ghi đè)")
+        directory = os.path.dirname(os.path.abspath(local)) or "."
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"thư mục đích không tồn tại: {directory}")
+
+        candidates = self._candidates()
+        last_timeout: tftp_errors.TftpTimeout | None = None
+        for index, candidate in enumerate(candidates):
+            self._new_state(candidate)
+            sock = self._open_socket(candidate)
+            started = time.monotonic()
+            self._info(
+                f"RRQ {remote} -> {local} qua {format_endpoint(candidate.host, candidate.port)} "
+                f"({candidate.family_name}, mode={self.mode}, blksize={self.blksize}, "
+                f"timeout={self.timeout}s, retries={self.retries}, "
+                f"{'có' if self.use_options else 'không'} option)"
+            )
+            try:
+                return self._download_with_socket(
+                    sock, remote, local, progress=progress, started=started
+                )
+            except tftp_errors.TftpTimeout as exc:
+                last_timeout = exc
+                if self._state.tid is not None or index + 1 >= len(candidates):
+                    raise
+                self._warn(
+                    f"địa chỉ {format_endpoint(candidate.host, candidate.port)} không phản hồi, "
+                    "thử địa chỉ DNS kế tiếp"
+                )
+            finally:
+                sock.close()
+        raise last_timeout or tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
+
+    def _download_with_socket(
+        self,
+        sock: socket.socket,
+        remote: str,
+        local: str,
+        *,
+        progress: ProgressFn | None,
+        started: float,
+    ) -> str:
         # 2.2: blksize/timeout thương lượng giữ trong biến local, không đụng self.
         block_size = self.blksize if self.use_options else DEFAULT_BLKSIZE
         cur_timeout = self.timeout
         negotiated_size: int | None = None
-        self._info(
-            f"RRQ {remote} -> {local} (mode={self.mode}, blksize={self.blksize}, "
-            f"timeout={self.timeout}s, retries={self.retries}, "
-            f"{'có' if self.use_options else 'không'} option)"
-        )
+        directory = os.path.dirname(os.path.abspath(local)) or "."
+        base = os.path.basename(local)
+        fd, temp_path = tempfile.mkstemp(prefix=f".{base}.", suffix=".part", dir=directory)
+        handle = os.fdopen(fd, "wb")
         try:
             wire_blksize = DEFAULT_BLKSIZE
             request = RRQ(remote, self.mode, self._requested_options(for_upload=False))
@@ -306,7 +394,7 @@ class TftpClient:
             block = 0
             total = 0
             decoder = NetasciiDecoder() if self.mode == "netascii" else None
-            with open(local, "wb") as handle:
+            with handle:
                 if first.OPCODE == OP_OACK:
                     wire_blksize, cur_timeout, negotiated_size = self._apply_oack(
                         first, block_size, cur_timeout
@@ -327,6 +415,7 @@ class TftpClient:
                     wire_blksize = DEFAULT_BLKSIZE
 
                 while True:
+                    self._check_deadline()
                     # Decoder giữ nối cặp CRLF bị tách giữa 2 DATA block.
                     payload = decoder.feed(packet.data) if decoder is not None else packet.data
                     handle.write(payload)
@@ -346,11 +435,34 @@ class TftpClient:
                     if tail:
                         handle.write(tail)
                         total += len(tail)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            if self.overwrite:
+                os.replace(temp_path, local)
+            else:
+                # Tạo đích bằng hard link: atomic, thất bại nếu file đã xuất hiện
+                # trong lúc transfer (không âm thầm ghi đè).
+                try:
+                    os.link(temp_path, local)
+                except FileExistsError:
+                    raise FileExistsError(f"file đích đã tồn tại: {local}") from None
+                else:
+                    os.remove(temp_path)
+            temp_path = ""
             self.metrics.incr("payload.received", total)
             self._summary("tải về", remote, total, block, started)
             return local
         finally:
-            sock.close()
+            try:
+                handle.close()
+            except OSError:
+                pass
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     # -------------------------------------------------------------- tải lên ---
     def upload(self, local: str, remote: str, *, progress: ProgressFn | None = None) -> str:
@@ -359,101 +471,91 @@ class TftpClient:
 
     def _upload(self, local: str, remote: str, *, progress: ProgressFn | None = None) -> str:
         size = os.path.getsize(local)
-        self._new_state()
-        sock = self._open_socket()
-        started = time.monotonic()
+        candidates = self._candidates()
+        last_timeout: tftp_errors.TftpTimeout | None = None
+        for index, candidate in enumerate(candidates):
+            self._new_state(candidate)
+            sock = self._open_socket(candidate)
+            started = time.monotonic()
+            self._info(
+                f"WRQ {local} -> {remote} qua {format_endpoint(candidate.host, candidate.port)} "
+                f"({candidate.family_name}, mode={self.mode}, blksize={self.blksize}, "
+                f"timeout={self.timeout}s, retries={self.retries}, {size} byte)"
+            )
+            try:
+                return self._upload_with_socket(
+                    sock, local, remote, size=size, progress=progress, started=started
+                )
+            except tftp_errors.TftpTimeout as exc:
+                last_timeout = exc
+                if self._state.tid is not None or index + 1 >= len(candidates):
+                    raise
+                self._warn(
+                    f"địa chỉ {format_endpoint(candidate.host, candidate.port)} không phản hồi, "
+                    "thử địa chỉ DNS kế tiếp"
+                )
+            finally:
+                sock.close()
+        raise last_timeout or tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
+
+    def _upload_with_socket(
+        self,
+        sock: socket.socket,
+        local: str,
+        remote: str,
+        *,
+        size: int,
+        progress: ProgressFn | None,
+        started: float,
+    ) -> str:
         block_size = self.blksize if self.use_options else DEFAULT_BLKSIZE
         cur_timeout = self.timeout
-        self._info(
-            f"WRQ {local} -> {remote} (mode={self.mode}, blksize={self.blksize}, "
-            f"timeout={self.timeout}s, retries={self.retries}, {size} byte)"
-        )
-        try:
-            wire_blksize = DEFAULT_BLKSIZE
-            request = WRQ(
-                remote, self.mode, self._requested_options(for_upload=True, size=size)
-            )
-            first = self._exchange(sock, request, (OP_OACK, OP_ACK), None)
-            self.metrics.observe("transfer.ttfb", time.monotonic() - started)
-            if first.OPCODE == OP_OACK:
-                wire_blksize, cur_timeout, _ = self._apply_oack(
-                    first, block_size, cur_timeout
-                )
-                if not self.use_options:
-                    wire_blksize = DEFAULT_BLKSIZE
-                try:
-                    sock.settimeout(cur_timeout)
-                except OSError:
-                    pass
-                self._info(
-                    f"server chấp nhận option: blksize={wire_blksize}, timeout={cur_timeout}s"
-                )
-                self._send(sock, ACK(0))
-            else:
+        wire_blksize = DEFAULT_BLKSIZE
+        request = WRQ(remote, self.mode, self._requested_options(for_upload=True, size=size))
+        first = self._exchange(sock, request, (OP_OACK, OP_ACK), None)
+        self.metrics.observe("transfer.ttfb", time.monotonic() - started)
+        if first.OPCODE == OP_OACK:
+            wire_blksize, cur_timeout, _ = self._apply_oack(first, block_size, cur_timeout)
+            if not self.use_options:
                 wire_blksize = DEFAULT_BLKSIZE
+            try:
+                sock.settimeout(cur_timeout)
+            except OSError:
+                pass
+            self._info(
+                f"server chấp nhận option: blksize={wire_blksize}, timeout={cur_timeout}s"
+            )
+            self._send(sock, ACK(0))
+        else:
+            wire_blksize = DEFAULT_BLKSIZE
 
-            block = 0
-            sent_total = 0
-            with open(local, "rb") as handle:
-                reader = NetasciiReader(handle, wire_blksize) if self.mode == "netascii" else None
-                while True:
-                    if reader is not None:
-                        chunk = reader.read_chunk()
-                    else:
-                        chunk = handle.read(wire_blksize)
-                    block = next_block(block)
-                    self._exchange(sock, DATA(block, chunk), (OP_ACK,), (OP_ACK, block))
-                    sent_total += len(chunk)
-                    self._log_block(block, len(chunk), sent_total)
-                    if progress is not None:
-                        progress(sent_total, size)
-                    if len(chunk) < wire_blksize:
-                        break
-            self.metrics.incr("payload.sent", sent_total)
-            self._summary("gửi lên", remote, sent_total, block, started)
-            return remote
-        finally:
-            sock.close()
+        block = 0
+        sent_total = 0
+        with open(local, "rb") as handle:
+            reader = NetasciiReader(handle, wire_blksize) if self.mode == "netascii" else None
+            while True:
+                self._check_deadline()
+                if reader is not None:
+                    chunk = reader.read_chunk()
+                else:
+                    chunk = handle.read(wire_blksize)
+                block = next_block(block)
+                self._exchange(sock, DATA(block, chunk), (OP_ACK,), (OP_ACK, block))
+                sent_total += len(chunk)
+                self._log_block(block, len(chunk), sent_total)
+                if progress is not None:
+                    progress(sent_total, size)
+                if len(chunk) < wire_blksize:
+                    break
+        self.metrics.incr("payload.sent", sent_total)
+        self._summary("gửi lên", remote, sent_total, block, started)
+        return remote
 
 
 # --------------------------------------------------------------------- CLI ---
 def _parse_server(value: str) -> tuple[str, int]:
-    """Parse `host[:port]`, hỗ trợ IPv6 `[::1]:port`. Raise ValueError nếu port xấu."""
-    text = value.strip()
-    if not text:
-        return "127.0.0.1", DEFAULT_PORT
-    if text.startswith("["):
-        # Dạng [host]:port hoặc [host]
-        if "]:" in text:
-            host_part, _, port_part = text.rpartition("]:")
-            host = host_part.lstrip("[")
-            if not port_part:
-                return host or "127.0.0.1", DEFAULT_PORT
-            try:
-                port = int(port_part)
-            except ValueError:
-                raise ValueError(f"port không hợp lệ: {port_part!r}") from None
-            if not 1 <= port <= 65535:
-                raise ValueError(f"port ngoài khoảng 1..65535: {port}")
-            return host or "127.0.0.1", port
-        if text.endswith("]"):
-            return text[1:-1] or "127.0.0.1", DEFAULT_PORT
-        raise ValueError(f"địa chỉ IPv6 không hợp lệ: {value!r}")
-    if ":" in text:
-        # IPv6 không ngoặc (chứa nhiều :) thì coi cả chuỗi là host.
-        if text.count(":") != 1:
-            return text, DEFAULT_PORT
-        host, _, port_part = text.rpartition(":")
-        if not port_part:
-            return host or "127.0.0.1", DEFAULT_PORT
-        try:
-            port = int(port_part)
-        except ValueError:
-            raise ValueError(f"port không hợp lệ: {port_part!r}") from None
-        if not 1 <= port <= 65535:
-            raise ValueError(f"port ngoài khoảng 1..65535: {port}")
-        return host or "127.0.0.1", port
-    return text, DEFAULT_PORT
+    """Parse `host[:port]`, hỗ trợ IPv6 `[::1]:port` và zone `[fe80::1%12]:6969`."""
+    return parse_host_port(value, DEFAULT_PORT)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -467,13 +569,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--server",
         default=f"127.0.0.1:{DEFAULT_PORT}",
-        help="địa chỉ server host[:port]",
+        help="địa chỉ server host[:port]; IPv6 dùng [2001:db8::10]:6969",
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--get", metavar="REMOTE", help="tải file từ server")
     group.add_argument("--put", metavar="LOCAL", help="gửi file lên server")
     parser.add_argument(
         "--save", help="đường dẫn lưu khi dùng --get (mặc định: tên file gốc)"
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="cho phép ghi đè file đích khi --get (mặc định từ chối)",
+    )
+    parser.add_argument(
+        "--family",
+        choices=("auto", "ipv4", "ipv6"),
+        default="auto",
+        help="họ địa chỉ khi phân giải DNS (mặc định auto: A + AAAA)",
+    )
+    parser.add_argument(
+        "--total-timeout",
+        type=float,
+        default=None,
+        help="thời gian tổng tối đa cho một transfer (giây)",
     )
     parser.add_argument(
         "--remote", help="tên file trên server khi dùng --put (mặc định: tên file gốc)"
@@ -529,15 +648,22 @@ def main(argv: list | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
         return 2
-    client = TftpClient(
-        host,
-        port,
-        timeout=args.timeout,
-        retries=args.retries,
-        blksize=args.blocksize,
-        mode=args.mode,
-        use_options=not args.no_options,
-    )
+    try:
+        client = TftpClient(
+            host,
+            port,
+            timeout=args.timeout,
+            retries=args.retries,
+            blksize=args.blocksize,
+            mode=args.mode,
+            use_options=not args.no_options,
+            family=args.family,
+            overwrite=args.overwrite,
+            total_timeout=args.total_timeout,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+        return 2
     try:
         if args.get:
             local = args.save or os.path.basename(args.get) or "download.out"

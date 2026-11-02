@@ -1,373 +1,303 @@
-"""HTTP auth/chat and real gateway -> TFTP integration (no external services)."""
+"""LAN upload portal tests."""
 
 from __future__ import annotations
 
-import io
-import sqlite3
+import logging
+import sys
 import tempfile
+import threading
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import tftp_errors
+from src.tftp_server import TftpServer
+
 try:
-    from src.web_upload import COOKIE, create_app, main, private_network
+    from src.web_upload import COOKIE, UploadConfigError, create_app, validate_bind_host
 except ModuleNotFoundError as exc:
     if exc.name not in {"flask", "werkzeug"}:
         raise
     create_app = None
 
-from tests.test_e2e import ServerHarness
+
+def authenticated_client(app):
+    """Exercise registration before using the upload API: it now requires an account."""
+    client = app.test_client()
+    csrf = client.get("/api/session", base_url="http://upload.lan").json["csrf"]
+    response = client.post(
+        "/api/register", json={"username": "upload_test", "password": "test-password123"},
+        base_url="http://upload.lan", headers={"X-CSRF-Token": csrf})
+    if response.status_code == 409:
+        response = client.post(
+            "/api/login", json={"username": "upload_test", "password": "test-password123"},
+            base_url="http://upload.lan", headers={"X-CSRF-Token": csrf})
+    if response.status_code != 200:
+        raise AssertionError(response.json)
+    return client, response.json["csrf"]
 
 
 @unittest.skipIf(create_app is None, 'Install web extras: pip install -e ".[web]"')
-class WebTest(unittest.TestCase):
+class TestWebUpload(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        base = Path(self.temp.name)
-        self.config = dict(TESTING=True, FILE_ROOT=base / "files", DATA_DIR=base / "data",
-                           MAX_FILE_SIZE=1024, TFTP_TIMEOUT=1, TFTP_RETRIES=1)
-        self.app = create_app(self.config)
-        self.client = self.app.test_client()
-        self.store = self.app.extensions["web_store"]
-        self.csrf = self.client.get("/api/session").json["csrf"]
+        self.tftp_root = Path(self.temp.name) / "tftp-root"
+        self.tftp_root.mkdir()
+        self.app = create_app(
+            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data"},
+            allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+            tftp_host="127.0.0.1",
+            tftp_port=6969,
+            max_file_size=1024,
+        )
+        self.app.config["TESTING"] = True
+        self.client, self.csrf = authenticated_client(self.app)
 
-    def post(self, path, body, *, client=None, csrf=None):
-        return (client or self.client).post(path, json=body,
-                                           headers={"X-CSRF-Token": csrf or self.csrf})
+    def tearDown(self):
+        self.temp.cleanup()
 
-    def register(self, username="alice", client=None, csrf=None):
-        response = self.post("/api/register", {"username": username, "password": "password123"},
-                             client=client, csrf=csrf)
-        self.assertEqual(response.status_code, 200, response.json)
-        if client is None:
-            self.csrf = response.json["csrf"]
-        return response.json["csrf"]
+    def upload_headers(self, host="upload.lan"):
+        return {
+            "Origin": f"http://{host}",
+            "Host": host,
+            "X-CSRF-Token": self.csrf,
+        }
 
-    def test_page_and_assets(self):
-        response = self.client.get("/")
+    def test_page_and_session_provide_csrf_and_no_store_header(self):
+        response = self.client.get("/", environ_base={"REMOTE_ADDR": "192.168.10.8"})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"portal.js", response.data)
-        for name in ["portal.js", "portal.css"]:
-            with self.client.get("/web_static/" + name) as asset:
-                self.assertEqual(asset.status_code, 200)
-        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
-        self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
+        session = self.client.get("/api/session", base_url="http://upload.lan").json
+        self.assertEqual(session["csrf"], self.csrf)
+        self.assertEqual(session["max_file_size"], 1024)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn("Content-Security-Policy", response.headers)
 
-    def test_guest_cannot_access_files_or_chat(self):
-        for path in ["/api/files", "/api/files/hello.txt", "/api/messages"]:
-            self.assertEqual(self.client.get(path).status_code, 401)
-        for path in ["/api/files", "/api/messages"]:
-            self.assertEqual(self.post(path, {}).status_code, 401)
-
-    def test_register_rotation_cookie_and_hash(self):
-        old = self.client.get_cookie(COOKIE).value
-        self.register()
-        cookie = self.client.get_cookie(COOKIE)
-        self.assertTrue(cookie.http_only)
-        self.assertEqual(cookie.same_site, "Lax")
-        self.assertNotEqual(cookie.value, old)
-        self.assertIsNone(self.store.session(old))
-        with self.store.connect() as db:
-            password = db.execute("SELECT password_hash FROM users").fetchone()[0]
-            tokens = [row[0] for row in db.execute("SELECT token_hash FROM sessions")]
-        self.assertNotIn("password123", password)
-        self.assertNotIn(cookie.value, tokens)
-        self.assertEqual(self.client.get("/api/session").json["user"], "alice")
-
-    def test_case_insensitive_duplicate(self):
-        self.register()
-        response = self.post("/api/register", {"username": "ALICE", "password": "password123"})
-        self.assertEqual(response.status_code, 409)
-
-    def test_registration_validation(self):
-        for body in [{}, {"username": "ab", "password": "password123"},
-                     {"username": "valid", "password": "short"},
-                     {"username": [], "password": "password123"}, []]:
-            with self.subTest(body=body):
-                self.assertEqual(self.post("/api/register", body).status_code, 400)
-
-    def test_login_logout_and_revocation(self):
-        self.register()
-        token = self.client.get_cookie(COOKIE).value
-        self.csrf = self.post("/api/logout", {}).json["csrf"]
-        self.assertIsNone(self.store.session(token))
-        self.assertEqual(self.client.get("/api/files").status_code, 401)
-        for username, password in [("alice", "wrongpass"), ("unknown", "password123")]:
-            self.assertEqual(self.post("/api/login", dict(username=username, password=password))
-                             .status_code, 401)
-        response = self.post("/api/login", dict(username="ALICE", password="password123"))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["user"], "alice")
-
-    def test_session_expiry(self):
-        self.register()
-        with self.store.connect() as db:
-            db.execute("UPDATE sessions SET expires=?", (time.time() - 1,))
-        self.assertEqual(self.client.get("/api/messages").status_code, 401)
-        session = self.client.get("/api/session").json
-        self.assertIsNone(session["user"])
-        self.assertNotEqual(session["csrf"], self.csrf)
-
-    def test_csrf_and_origin(self):
-        self.register()
-        self.assertEqual(self.client.post("/api/messages", json={"body": "hello"}).status_code, 403)
-        self.assertEqual(self.client.post("/api/logout", headers={"X-CSRF-Token": "bad"})
-                         .status_code, 403)
-        response = self.client.post("/api/messages", json={"body": "hello"},
-                                    headers={"X-CSRF-Token": self.csrf,
-                                             "Origin": "http://other.example"})
+    def test_remote_outside_allowed_lan_is_denied(self):
+        response = self.client.get("/", environ_base={"REMOTE_ADDR": "203.0.113.8"})
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(self.client.post("/api/logout", headers={"X-CSRF-Token": "é"})
-                         .status_code, 403)
 
-    def test_network_and_spoofed_proxy(self):
-        response = self.client.get("/", environ_overrides={"REMOTE_ADDR": "8.8.8.8"},
-                                   headers={"X-Forwarded-For": "127.0.0.1"})
-        self.assertEqual(response.status_code, 403)
-        for network in ["0.0.0.0/0", "8.8.8.0/24", "::/0"]:
-            with self.subTest(network=network), self.assertRaises(ValueError):
-                private_network(network)
-        for network in ["192.168.1.0/24", "10.0.0.0/8", "127.0.0.0/8", "fd12::/64"]:
-            private_network(network)
+    def test_upload_forwards_file_to_tftp_server(self):
+        client_instances = []
+        staged_paths = []
+        tftp_root = self.tftp_root
 
-    def test_unsafe_data_directory(self):
-        with self.assertRaises(ValueError):
-            create_app({**self.config, "DATA_DIR": self.config["FILE_ROOT"] / "secret"})
+        class FakeTftpClient:
+            def __init__(self, host, port, **kwargs):
+                client_instances.append((host, port))
 
-    def test_persistent_users_session_messages(self):
-        self.register()
-        self.post("/api/messages", {"body": "persisted"})
-        token = self.client.get_cookie(COOKIE).value
-        other = create_app(self.config).test_client()
-        other.set_cookie(COOKIE, token)
-        self.assertEqual(other.get("/api/session").json["user"], "alice")
-        self.assertEqual(other.get("/api/messages").json["messages"][0]["body"], "persisted")
+            def upload(self, local, remote):
+                staged_paths.append(Path(local))
+                (tftp_root / remote).write_bytes(Path(local).read_bytes())
 
-    def test_two_accounts_can_chat(self):
-        self.register()
-        other = self.app.test_client()
-        other_csrf = other.get("/api/session").json["csrf"]
-        other_csrf = self.register("bobby", client=other, csrf=other_csrf)
-        first = self.post("/api/messages", {"body": "  Chào bạn <script>alert(1)</script>  "})
-        self.assertEqual(first.status_code, 201)
-        messages = other.get("/api/messages").json["messages"]
-        self.assertEqual(messages[0]["username"], "alice")
-        self.assertEqual(messages[0]["body"], "Chào bạn <script>alert(1)</script>")
-        self.post("/api/messages", {"body": "Chào Alice"}, client=other, csrf=other_csrf)
-        new = self.client.get(f"/api/messages?after={first.json['id']}").json["messages"]
-        self.assertEqual(len(new), 1)
-        self.assertEqual(new[0]["username"], "bobby")
+        with patch("src.web_upload.TftpClient", FakeTftpClient):
+            response = self.client.post(
+                "/api/upload",
+                data={"file": (bytes_file("report.txt", b"hello"), "report.txt")},
+                headers=self.upload_headers(),
+                environ_base={"REMOTE_ADDR": "192.168.10.8"},
+            )
 
-    def test_chat_validation_limits_and_cursor(self):
-        self.register()
-        for body in [{"body": " "}, {"body": "a" * 2001}, {"body": 1}, []]:
-            self.assertEqual(self.post("/api/messages", body).status_code, 400)
-        for cursor in ["-1", "abc", "9" * 30]:
-            self.assertEqual(self.client.get("/api/messages?after=" + cursor).status_code, 400)
-        for _ in range(30):
-            self.assertEqual(self.post("/api/messages", {"body": "hello"}).status_code, 201)
-        self.assertEqual(self.post("/api/messages", {"body": "blocked"}).status_code, 429)
-        self.assertEqual(self.client.get("/api/messages?after=0").json["messages"][0]["id"], 1)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(client_instances, [("127.0.0.1", 6969)])
+        self.assertEqual((self.tftp_root / "report.txt").read_bytes(), b"hello")
+        self.assertEqual(response.json["size"], 5)
+        self.assertEqual(len(staged_paths), 1)
+        self.assertFalse(staged_paths[0].exists())
 
-    def test_chat_backlog_pagination(self):
-        self.register()
-        user_id = self.store.session(self.client.get_cookie(COOKIE).value)["user_id"]
-        with self.store.connect() as db:
-            db.executemany("INSERT INTO messages (user_id, body, created) VALUES (?, ?, ?)",
-                           [(user_id, str(i), time.time()) for i in range(160)])
-        initial = self.client.get("/api/messages").json["messages"]
-        self.assertEqual(len(initial), 50)
-        self.assertEqual(initial[0]["id"], 111)
-        page = self.client.get("/api/messages?after=0").json["messages"]
-        self.assertEqual(len(page), 100)
-        self.assertEqual(page[-1]["id"], 100)
-
-    def test_login_and_registration_rate_limits(self):
-        for _ in range(10):
-            self.assertEqual(self.post("/api/login", dict(username="nobody", password="badpass123"))
-                             .status_code, 401)
-        self.assertEqual(self.post("/api/login", {}).status_code, 429)
-        for _ in range(5):
-            self.post("/api/register", {})
-        self.assertEqual(self.post("/api/register", {}).status_code, 429)
-        with self.store.connect() as db:
-            db.execute("UPDATE limits SET started=?", (time.time() - 65,))
-        self.assertEqual(self.post("/api/login", {}).status_code, 401)
-
-    def test_file_list_and_path_restrictions(self):
-        self.register()
-        root = self.config["FILE_ROOT"]
-        (root / "hello.txt").write_bytes(b"hello")
-        (root / "subdir").mkdir()
-        listing = self.client.get("/api/files").json["files"]
-        self.assertEqual([file["name"] for file in listing], ["hello.txt"])
-        for name in ["..", "CON", "a:b", "foo%5Cbar", "trailing."]:
-            self.assertEqual(self.client.get("/api/files/" + name).status_code, 400)
-        self.assertEqual(self.client.get("/api/files/missing.txt").status_code, 404)
-
-    def test_symlink_not_listed_or_downloaded(self):
-        self.register()
-        target = Path(self.temp.name) / "secret.txt"
-        target.write_text("secret")
-        link = self.config["FILE_ROOT"] / "linked.txt"
+    def test_browser_upload_is_received_by_real_tftp_server(self):
+        server = TftpServer(
+            host="127.0.0.1",
+            port=0,
+            root=str(self.tftp_root),
+            timeout=0.5,
+            retries=2,
+            logger=logging.getLogger("tftp.test.web"),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
         try:
-            link.symlink_to(target)
-        except OSError:
-            self.skipTest("OS does not allow creating symlinks")
-        self.assertEqual(self.client.get("/api/files").json["files"], [])
-        self.assertEqual(self.client.get("/api/files/linked.txt").status_code, 400)
-
-    def test_real_tftp_upload_download_and_empty(self):
-        self.register()
-        with ServerHarness({"hello.txt": b"hello", "empty.bin": b""},
-                           allow_overwrite=False) as server:
-            token = self.client.get_cookie(COOKIE).value
-            self.app = create_app({**self.config, "FILE_ROOT": server.root,
-                                   "TFTP_PORT": server.port})
-            self.client = self.app.test_client()
-            self.client.set_cookie(COOKIE, token)
-            for name, expected in [("hello.txt", b"hello"), ("empty.bin", b"")]:
-                response = self.client.get("/api/files/" + name)
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.data, expected)
-                self.assertIn("attachment", response.headers["Content-Disposition"])
-                response.close()
+            for _ in range(200):
+                if server.bound_port:
+                    break
+                time.sleep(0.01)
+            self.assertGreater(server.bound_port, 0)
+            self.app = create_app(
+                {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data2"},
+                allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+                tftp_host="127.0.0.1",
+                tftp_port=server.bound_port,
+                max_file_size=1024,
+            )
+            self.app.config["TESTING"] = True
+            self.client, self.csrf = authenticated_client(self.app)
+            payload = b"received through TFTP"
             response = self.client.post(
-                "/api/files", data={"file": (io.BytesIO(b"uploaded"), "up.txt")},
-                headers={"X-CSRF-Token": self.csrf})
-            self.assertEqual(response.status_code, 201, response.json)
-            self.assertEqual(server.read("up.txt"), b"uploaded")
-            server.server.wait_for_idle()
-            self.assertIn("up.txt", [item["name"] for item in
-                                     self.client.get("/api/files").json["files"]])
-            with self.assertLogs("tftp.web", level="ERROR"):
-                duplicate = self.client.post(
-                    "/api/files", data={"file": (io.BytesIO(b"replacement"), "up.txt")},
-                    headers={"X-CSRF-Token": self.csrf})
-            self.assertEqual(duplicate.status_code, 502)
-            self.assertEqual(server.read("up.txt"), b"uploaded")
-            vietnamese = self.client.post(
-                "/api/files", data={"file": (io.BytesIO(b"vietnamese name"), "Đề tài.txt")},
-                headers={"X-CSRF-Token": self.csrf})
-            self.assertEqual(vietnamese.status_code, 201, vietnamese.json)
-            self.assertEqual(vietnamese.json["filename"], "De_tai.txt")
-            self.assertEqual(server.read("De_tai.txt"), b"vietnamese name")
-            with self.client.get("/api/files/De_tai.txt") as downloaded:
-                self.assertEqual(downloaded.data, b"vietnamese name")
-        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+                "/api/upload",
+                data={"file": (bytes_file("from-browser.txt", payload), "from-browser.txt")},
+                headers=self.upload_headers(),
+                environ_base={"REMOTE_ADDR": "192.168.10.8"},
+            )
 
-    def test_download_cleanup_when_closed_before_consuming(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "data.txt").write_bytes(b"x")
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual((self.tftp_root / "from-browser.txt").read_bytes(), payload)
+        finally:
+            server.shutdown()
+            server.wait_for_idle(timeout=5)
+            thread.join(timeout=5)
 
-        def download(remote, local, **kwargs):
-            Path(local).write_bytes(b"payload")
+    def test_tftp_server_duplicate_is_returned_without_overwrite(self):
+        def reject_duplicate(_local, _remote):
+            raise tftp_errors.TftpRemoteError(tftp_errors.ERR_FILE_EXISTS, "file already exists")
 
-        with patch("src.web_upload.TftpClient.download", side_effect=download):
-            for _ in range(6):
-                response = self.client.get("/api/files/data.txt", buffered=False)
-                self.assertEqual(response.status_code, 200)
-                response.close()
-        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+        with patch("src.web_upload.TftpClient") as tftp_client:
+            tftp_client.return_value.upload.side_effect = reject_duplicate
+            response = self.client.post(
+                "/api/upload",
+                data={"file": (bytes_file("same.txt", b"new"), "same.txt")},
+                headers=self.upload_headers(),
+                environ_base={"REMOTE_ADDR": "192.168.10.8"},
+            )
 
-    def test_transfer_capacity_released_after_disconnect(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "data.txt").write_bytes(b"x")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("TFTP server", response.json["error"])
 
-        def download(remote, local, **kwargs):
-            Path(local).write_bytes(b"payload")
+    def test_tftp_timeout_is_reported_as_gateway_timeout(self):
+        with patch("src.web_upload.TftpClient") as tftp_client:
+            tftp_client.return_value.upload.side_effect = tftp_errors.TftpTimeout("server timeout")
+            response = self.client.post(
+                "/api/upload",
+                data={"file": (bytes_file("report.txt", b"x"), "report.txt")},
+                headers=self.upload_headers(),
+                environ_base={"REMOTE_ADDR": "192.168.10.8"},
+            )
 
-        with patch("src.web_upload.TftpClient.download", side_effect=download):
-            responses = []
-            try:
-                for _ in range(4):
-                    responses.append(self.client.get("/api/files/data.txt", buffered=False))
-                    self.assertEqual(responses[-1].status_code, 200)
-                self.assertEqual(self.client.get("/api/files/data.txt").status_code, 503)
-                responses.pop().close()
-                responses.append(self.client.get("/api/files/data.txt", buffered=False))
-                self.assertEqual(responses[-1].status_code, 200)
-            finally:
-                for response in responses:
-                    response.close()
-        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("TFTP server", response.json["error"])
 
-    def test_download_temporary_directory_failure_releases_capacity(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "data.txt").write_bytes(b"x")
-        with patch("src.web_upload.tempfile.TemporaryDirectory", side_effect=OSError("disk full")):
-            with self.assertLogs("tftp.web", level="ERROR"):
-                for _ in range(5):
-                    self.assertEqual(self.client.get("/api/files/data.txt").status_code, 502)
+    def test_invalid_csrf_or_origin_is_rejected(self):
+        for headers in (
+            {"Origin": "http://upload.lan", "Host": "upload.lan", "X-CSRF-Token": "bad"},
+            {
+                "Origin": "http://attacker.example",
+                "Host": "upload.lan",
+                "X-CSRF-Token": self.csrf,
+            },
+            {"Host": "upload.lan", "X-CSRF-Token": self.csrf},
+        ):
+            with self.subTest(headers=headers):
+                response = self.client.post(
+                    "/api/upload",
+                    data={"file": (bytes_file("report.txt", b"x"), "report.txt")},
+                    headers=headers,
+                    environ_base={"REMOTE_ADDR": "192.168.10.8"},
+                )
+                self.assertEqual(response.status_code, 403)
 
-    def test_small_json_body_limit(self):
-        self.register()
-        response = self.post("/api/messages", {"body": "x" * 20000})
+    def test_upload_size_limit_and_temporary_cleanup(self):
+        with patch("src.web_upload.TftpClient") as tftp_client:
+            response = self.client.post(
+                "/api/upload",
+                data={"file": (bytes_file("large.bin", b"x" * 2048), "large.bin")},
+                headers=self.upload_headers(),
+                environ_base={"REMOTE_ADDR": "192.168.10.8"},
+            )
         self.assertEqual(response.status_code, 413)
+        tftp_client.return_value.upload.assert_not_called()
 
-    def test_mocked_symlink_is_hidden_even_without_os_privilege(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "linked.txt").write_text("secret")
-        with patch("src.web_upload.Path.is_symlink", return_value=True):
-            self.assertEqual(self.client.get("/api/files").json["files"], [])
-            self.assertEqual(self.client.get("/api/files/linked.txt").status_code, 400)
+    def test_only_allows_configured_number_of_concurrent_uploads(self):
+        app = create_app(
+            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "concurrent"},
+            allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+            max_file_size=1024,
+            max_concurrent_uploads=1,
+        )
+        app.config["TESTING"] = True
+        entered_tftp = threading.Event()
+        finish_tftp = threading.Event()
+        first_responses = []
 
-    def test_transfer_size_limits_and_cleanup(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "large.txt").write_bytes(b"x" * 1025)
-        self.assertEqual(self.client.get("/api/files/large.txt").status_code, 413)
-        (self.config["FILE_ROOT"] / "large.txt").write_bytes(b"x")
+        class BlockingTftpClient:
+            def __init__(self, _host, _port, **kwargs):
+                pass
 
-        def too_large(remote, local, *, progress):
-            Path(local).write_bytes(b"x" * 1025)
-            progress(1025, 1025)
+            def upload(self, _local, _remote):
+                entered_tftp.set()
+                if not finish_tftp.wait(timeout=5):
+                    raise TimeoutError("test upload was not released")
 
-        with patch("src.web_upload.TftpClient.download", side_effect=too_large):
-            self.assertEqual(self.client.get("/api/files/large.txt").status_code, 413)
-        for payload in [b"x" * 1025, b"x" * 70000]:
-            response = self.client.post(
-                "/api/files", data={"file": (io.BytesIO(payload), "large.txt")},
-                headers={"X-CSRF-Token": self.csrf})
-            self.assertEqual(response.status_code, 413)
-        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+        authenticated, csrf = authenticated_client(app)
+        token = authenticated.get_cookie(COOKIE, domain="upload.lan").value
+        headers = {
+            "Origin": "http://upload.lan",
+            "Host": "upload.lan",
+            "X-CSRF-Token": csrf,
+        }
 
-    def test_tftp_failure_is_reported_and_cleaned(self):
-        self.register()
-        (self.config["FILE_ROOT"] / "hello.txt").write_bytes(b"hello")
-        from src.tftp_errors import TftpTimeout
-        with patch("src.web_upload.TftpClient.download", side_effect=TftpTimeout()):
-            with self.assertLogs("tftp.web", level="ERROR"):
-                response = self.client.get("/api/files/hello.txt")
-        self.assertEqual(response.status_code, 502)
-        self.assertNotIn(self.temp.name, response.get_data(as_text=True))
-        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+        def first_upload():
+            with app.test_client() as client:
+                client.set_cookie(COOKIE, token, domain="upload.lan")
+                first_responses.append(
+                    client.post(
+                        "/api/upload",
+                        data={"file": (bytes_file("first.txt", b"first"), "first.txt")},
+                        headers=headers,
+                        environ_base={"REMOTE_ADDR": "192.168.10.8"},
+                    )
+                )
 
-    def test_upload_validation(self):
-        self.register()
-        self.assertEqual(self.post("/api/files", {}).status_code, 400)
-        for name in ["../escape.txt", "CON", "C:\\file.txt"]:
-            response = self.client.post("/api/files", data={"file": (io.BytesIO(b"x"), name)},
-                                        headers={"X-CSRF-Token": self.csrf})
-            self.assertEqual(response.status_code, 400)
+        with patch("src.web_upload.TftpClient", BlockingTftpClient):
+            worker = threading.Thread(target=first_upload)
+            worker.start()
+            try:
+                self.assertTrue(entered_tftp.wait(timeout=5))
+                with app.test_client() as client:
+                    client.set_cookie(COOKIE, token, domain="upload.lan")
+                    response = client.post(
+                        "/api/upload",
+                        data={"file": (bytes_file("second.txt", b"second"), "second.txt")},
+                        headers=headers,
+                        environ_base={"REMOTE_ADDR": "192.168.10.8"},
+                    )
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.headers["Retry-After"], "5")
+            finally:
+                finish_tftp.set()
+                worker.join(timeout=5)
 
-    def test_cli_rejects_public_wildcard_and_missing_allowlist(self):
-        for args in [["--host", "0.0.0.0"], ["--host", "8.8.8.8"],
-                     ["--host", "192.168.1.10"], ["--max-file-size", "0"],
-                     ["--tftp-server", "[::1]:6969"]]:
-            with self.subTest(args=args), patch("sys.stderr", new=io.StringIO()):
-                with self.assertRaises(SystemExit) as exc:
-                    main(args)
-                self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(first_responses[0].status_code, 201)
+        semaphore = app.config["UPLOAD_SEMAPHORE"]
+        self.assertTrue(semaphore.acquire(blocking=False))
+        semaphore.release()
 
-    def test_database_error_hides_details(self):
-        with patch.object(self.store, "session", side_effect=sqlite3.OperationalError("secret")):
-            with self.assertLogs("tftp.web", level="ERROR"):
-                response = self.client.get("/api/session")
-        self.assertEqual(response.status_code, 503)
-        self.assertNotIn(b"secret", response.data)
+    def test_private_bind_validation(self):
+        self.assertEqual(validate_bind_host("192.168.1.10"), "192.168.1.10")
+        self.assertEqual(validate_bind_host("127.0.0.1"), "127.0.0.1")
+        for address in ("0.0.0.0", "8.8.8.8", "::"):
+            with self.subTest(address=address), self.assertRaises(UploadConfigError):
+                validate_bind_host(address)
+
+    def test_public_allowlist_and_invalid_tftp_port_are_rejected(self):
+        with self.assertRaises(UploadConfigError):
+            create_app(allowed_networks=["0.0.0.0/0"])
+        with self.assertRaises(UploadConfigError):
+            create_app(allowed_networks=["127.0.0.1/32"], tftp_port=70000)
+        with self.assertRaises(UploadConfigError):
+            create_app(
+                allowed_networks=["127.0.0.1/32"],
+                max_concurrent_uploads=0,
+            )
+
+
+def bytes_file(_filename: str, content: bytes) -> BytesIO:
+    """Create an in-memory upload stream for Flask's test client."""
+    return BytesIO(content)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

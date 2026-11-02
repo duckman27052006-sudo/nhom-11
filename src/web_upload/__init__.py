@@ -16,13 +16,19 @@ from flask import Flask, g, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
-from .tftp_client import TftpClient
-from .tftp_errors import TftpError
-from .web_store import SESSION_SECONDS, Store
+from .. import enable_utf8_console
+from ..tftp_client import TftpClient
+from ..tftp_errors import TftpError
+from ..tftp_net import parse_host_port
+from ..web_store import SESSION_SECONDS, Store
 
 LOG = logging.getLogger("tftp.web")
 COOKIE = "tftp_session"
 USERNAME = re.compile(r"[A-Za-z0-9_]{3,32}\Z")
+
+
+class UploadConfigError(ValueError):
+    """Invalid LAN gateway configuration."""
 
 
 def private_network(value: str):
@@ -32,24 +38,48 @@ def private_network(value: str):
     )]
     if not any(network.version == allowed.version and network.subnet_of(allowed)
                for allowed in ranges):
-        raise ValueError("Chỉ chấp nhận subnet private hoặc loopback cụ thể.")
+        raise UploadConfigError("Chỉ chấp nhận subnet private hoặc loopback cụ thể.")
     return network
 
 
-def create_app(config: dict | None = None) -> Flask:
-    app = Flask(__name__, template_folder="web_templates", static_folder="web_static")
+def validate_bind_host(value: str) -> str:
+    try:
+        address = ipaddress.ip_address(value.strip("[]"))
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        private_network(f"{address}/{address.max_prefixlen}")
+        return str(address)
+    except ValueError as exc:
+        raise UploadConfigError("Host phải là IP private hoặc loopback cụ thể.") from exc
+
+
+def create_app(config: dict | None = None, *, allowed_networks: list[str] | None = None,
+               tftp_host: str | None = None, tftp_port: int | None = None,
+               max_file_size: int | None = None,
+               max_concurrent_uploads: int | None = None) -> Flask:
+    app = Flask(__name__, template_folder="templates", static_folder="static",
+                static_url_path="/web_static")
     app.config.from_mapping(
         FILE_ROOT="files", DATA_DIR="web-data", TFTP_HOST="127.0.0.1", TFTP_PORT=6969,
         TFTP_TIMEOUT=2, TFTP_RETRIES=3, MAX_FILE_SIZE=100 * 1024 * 1024,
         ALLOWED_NETWORKS=["127.0.0.0/8", "::1/128"], COOKIE_SECURE=False,
+        MAX_CONCURRENT_UPLOADS=4,
     )
     app.config.update(config or {})
+    overrides = dict(ALLOWED_NETWORKS=allowed_networks, TFTP_HOST=tftp_host,
+                     TFTP_PORT=tftp_port, MAX_FILE_SIZE=max_file_size,
+                     MAX_CONCURRENT_UPLOADS=max_concurrent_uploads)
+    app.config.update({key: value for key, value in overrides.items() if value is not None})
+    if not app.config["TFTP_HOST"].strip() or not 1 <= app.config["TFTP_PORT"] <= 65535:
+        raise UploadConfigError("Địa chỉ hoặc cổng TFTP không hợp lệ.")
+    if app.config["MAX_CONCURRENT_UPLOADS"] < 1:
+        raise UploadConfigError("Số lượt truyền đồng thời phải lớn hơn 0.")
     root = Path(app.config["FILE_ROOT"]).resolve()
     data = Path(app.config["DATA_DIR"]).resolve()
     if data == root or root in data.parents:
-        raise ValueError("DATA_DIR phải nằm ngoài thư mục file TFTP.")
+        raise UploadConfigError("DATA_DIR phải nằm ngoài thư mục file TFTP.")
     if app.config["MAX_FILE_SIZE"] <= 0:
-        raise ValueError("Giới hạn file phải lớn hơn 0.")
+        raise UploadConfigError("Giới hạn file phải lớn hơn 0.")
     root.mkdir(parents=True, exist_ok=True)
     data.mkdir(parents=True, exist_ok=True)
     temporary_root = data / "temporary"
@@ -59,20 +89,23 @@ def create_app(config: dict | None = None) -> Flask:
     app.config["MAX_FORM_MEMORY_SIZE"] = 64 * 1024
     networks = [private_network(value) for value in app.config["ALLOWED_NETWORKS"]]
     if not networks:
-        raise ValueError("Cần ít nhất một subnet LAN được phép.")
+        raise UploadConfigError("Cần ít nhất một subnet LAN được phép.")
     store = Store(data / "portal.sqlite3")
     app.extensions["web_store"] = store
-    slots = threading.BoundedSemaphore(4)
+    slots = threading.BoundedSemaphore(app.config["MAX_CONCURRENT_UPLOADS"])
+    app.config["UPLOAD_SEMAPHORE"] = slots
 
     def fail(message: str, status: int):
         return jsonify(error=message), status
 
     @app.before_request
     def protect():
-        if request.path != "/api/files":
+        if request.path not in {"/api/files", "/api/upload"}:
             request.max_content_length = 16 * 1024
         try:
             address = ipaddress.ip_address(request.remote_addr or "")
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                address = address.ipv4_mapped
         except ValueError:
             return fail("Không xác định được địa chỉ thiết bị.", 403)
         if not any(address in network for network in networks):
@@ -85,7 +118,9 @@ def create_app(config: dict | None = None) -> Flask:
                     return fail("Vui lòng đăng nhập để tiếp tục.", 401)
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 origin = request.headers.get("Origin")
-                if origin and origin != request.host_url.rstrip("/"):
+                upload_request = request.path in {"/api/files", "/api/upload"}
+                if (upload_request and not origin) or (
+                        origin and origin != request.host_url.rstrip("/")):
                     return fail("Nguồn yêu cầu không hợp lệ.", 403)
                 csrf = request.headers.get("X-CSRF-Token", "")
                 if (not g.account or not csrf
@@ -121,6 +156,10 @@ def create_app(config: dict | None = None) -> Flask:
     @app.get("/")
     def index():
         return render_template("portal.html")
+
+    @app.get("/healthz")
+    def health():
+        return jsonify(status="ok")
 
     def session_response(user_id=None):
         token, csrf = store.new_session(g.token, user_id)
@@ -257,6 +296,7 @@ def create_app(config: dict | None = None) -> Flask:
             raise
 
     @app.post("/api/files")
+    @app.post("/api/upload")
     def upload():
         incoming = request.files.get("file")
         if incoming is None or file_path(incoming.filename or "", allow_unicode=True) is None:
@@ -267,7 +307,9 @@ def create_app(config: dict | None = None) -> Flask:
         if file_path(remote) is None:
             return fail("Không thể chuyển tên file sang tên ASCII hợp lệ.", 400)
         if not slots.acquire(blocking=False):
-            return fail("Máy chủ đang truyền nhiều file. Hãy thử lại sau.", 503)
+            response, status = fail("Máy chủ đang truyền nhiều file. Hãy thử lại sau.", 503)
+            response.headers["Retry-After"] = "5"
+            return response, status
         try:
             with tempfile.TemporaryDirectory(dir=temporary_root) as temp:
                 local = Path(temp) / "upload"
@@ -279,10 +321,24 @@ def create_app(config: dict | None = None) -> Flask:
                         handle.write(chunk)
                 client().upload(str(local), remote)
             LOG.info("Upload from %s by %s", request.remote_addr, g.account["username"])
-            return jsonify(message="Đã gửi file thành công.", filename=remote), 201
+            return jsonify(message="Đã gửi file thành công.", filename=remote, size=count), 201
         except ValueError:
             return fail("File vượt quá dung lượng cho phép.", 413)
-        except (OSError, TftpError):
+        except TftpError as exc:
+            from .. import tftp_errors
+
+            status = 504 if isinstance(exc, tftp_errors.TftpTimeout) else {
+                tftp_errors.ERR_ACCESS_VIOLATION: 403,
+                tftp_errors.ERR_DISK_FULL: 507,
+                tftp_errors.ERR_FILE_EXISTS: 409,
+            }.get(exc.code, 502)
+            messages = {504: "TFTP server không phản hồi. Hãy thử lại sau.",
+                        403: "TFTP server từ chối quyền ghi file.",
+                        507: "TFTP server không còn đủ dung lượng.",
+                        409: "TFTP server đã có file trùng tên. Hãy đổi tên file."}
+            LOG.exception("TFTP upload failed")
+            return fail(messages.get(status, "TFTP server không thể tiếp nhận file."), status)
+        except OSError:
             LOG.exception("TFTP upload failed")
             return fail("Không thể gửi file. Kiểm tra TFTP và chính sách ghi đè.", 502)
         finally:
@@ -310,6 +366,7 @@ def create_app(config: dict | None = None) -> Flask:
 
 
 def main(argv=None) -> int:
+    enable_utf8_console()
     parser = argparse.ArgumentParser(description="Cổng file và chat TFTP trong LAN")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -319,25 +376,22 @@ def main(argv=None) -> int:
     parser.add_argument("--tftp-server", default="127.0.0.1:6969")
     parser.add_argument("--max-file-size", type=int, default=100, help="MiB mỗi file")
     parser.add_argument("--secure-cookie", action="store_true", help="Chỉ bật sau HTTPS proxy")
+    parser.add_argument("--max-concurrent-uploads", type=int, default=4)
+    parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args(argv)
     try:
-        host = ipaddress.ip_address(args.host)
-        private_network(f"{host}/{host.max_prefixlen}")
-        if host.is_unspecified:
-            raise ValueError("--host phải là IP private hoặc loopback cụ thể.")
+        host = ipaddress.ip_address(validate_bind_host(args.host))
         if not 1 <= args.port <= 65535:
             raise ValueError("Port phải nằm trong khoảng 1–65535.")
-        tftp_host, separator, tftp_port = args.tftp_server.rpartition(":")
-        if not separator or not tftp_host or not 1 <= int(tftp_port) <= 65535:
-            raise ValueError("--tftp-server cần có dạng IPv4:port hoặc hostname:port.")
-        # The existing TFTP client uses AF_INET; do not promise IPv6 transfer support.
-        if ":" in tftp_host:
-            raise ValueError("TFTP client hiện hỗ trợ IPv4; hãy dùng IPv4 hoặc hostname.")
+        tftp_host, tftp_port = parse_host_port(args.tftp_server, 6969)
+        if args.threads < 1:
+            raise ValueError("Số worker phải lớn hơn 0.")
         networks = args.allowed_network or ([f"{host}/{host.max_prefixlen}"] if host.is_loopback
                                             else [])
         app = create_app(dict(FILE_ROOT=args.root, DATA_DIR=args.data_dir,
                               ALLOWED_NETWORKS=networks, TFTP_HOST=tftp_host,
                               TFTP_PORT=int(tftp_port), MAX_FILE_SIZE=args.max_file_size * 1024**2,
+                              MAX_CONCURRENT_UPLOADS=args.max_concurrent_uploads,
                               COOKIE_SECURE=args.secure_cookie))
     except ValueError as exc:
         parser.error(str(exc))
@@ -346,7 +400,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     LOG.info("LAN portal: http://%s:%s; TFTP=%s; root=%s", host, args.port,
              args.tftp_server, Path(args.root).resolve())
-    serve(app, host=str(host), port=args.port, threads=8,
+    serve(app, host=str(host), port=args.port, threads=args.threads,
           max_request_body_size=app.config["MAX_CONTENT_LENGTH"],
           ipv4=host.version == 4, ipv6=host.version == 6, clear_untrusted_proxy_headers=True)
     return 0

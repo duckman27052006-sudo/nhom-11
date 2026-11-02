@@ -1,0 +1,18 @@
+{
+  "host": "0.0.0.0",
+  "host6": "::",
+  "family": "dual",
+  "port": 6969,
+  "root": "/var/lib/tftp/files",
+  "allow_overwrite": false,
+  "max_clients": 32,
+  "max_file_size": 268435456,
+  "min_free_bytes": 16777216,
+  "max_total_bytes": 10737418240,
+  "max_transfer_seconds": 3600,
+  "tid_port_range": [50000, 50100],
+  "cleanup_temp_age": 86400,
+  "log_file": "/var/log/tftp/server.log",
+  "log_max_bytes": 10485760,
+  "log_backups": 5
+}

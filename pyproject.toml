@@ -27,7 +27,7 @@ where = ["."]
 include = ["src*"]
 
 [tool.setuptools.package-data]
-src = ["web_templates/*.html", "web_static/*.css", "web_static/*.js"]
+"src.web_upload" = ["templates/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -468,16 +468,12 @@ def bytes_to_netascii(data: bytes) -> bytes:
 
     Đây là ánh xạ 1-1 theo từng byte, nên cắt khối ở đâu cũng không làm hỏng
     dữ liệu; phía nhận dùng :class:`NetasciiDecoder` để ghép lại.
+
+    Cài đặt bằng ``bytes.replace`` (chạy trong C) thay vì vòng lặp Python từng
+    byte: hai lần thay tuần tự không giẫm lên nhau vì lần đầu chỉ thêm ``NUL``
+    sau ``CR``, lần sau chỉ thêm ``CR`` trước ``LF``.
     """
-    out = bytearray()
-    for byte in data:
-        if byte == 0x0D:
-            out += b"\r\x00"
-        elif byte == 0x0A:
-            out += b"\r\n"
-        else:
-            out.append(byte)
-    return bytes(out)
+    return bytes(data).replace(b"\r", b"\r\x00").replace(b"\n", b"\r\n")
 
 
 def netascii_to_bytes(data: bytes) -> bytes:
@@ -486,24 +482,7 @@ def netascii_to_bytes(data: bytes) -> bytes:
     Một ``CR`` đơn lẻ (không theo sau bởi LF/NUL) là gói tin sai chuẩn; giữ
     nguyên ``CR`` thay vì tự đoán thành xuống dòng.
     """
-    out = bytearray()
-    index = 0
-    length = len(data)
-    while index < length:
-        byte = data[index]
-        if byte == 0x0D and index + 1 < length:
-            following = data[index + 1]
-            if following == 0x0A:
-                out.append(0x0A)
-                index += 2
-                continue
-            if following == 0x00:
-                out.append(0x0D)
-                index += 2
-                continue
-        out.append(byte)
-        index += 1
-    return bytes(out)
+    return bytes(data).replace(b"\r\n", b"\n").replace(b"\r\x00", b"\r")
 
 
 class NetasciiReader:

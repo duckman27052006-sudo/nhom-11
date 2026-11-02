@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import struct
 import sys
 import unittest
@@ -211,6 +212,46 @@ class TestNetascii(unittest.TestCase):
     def test_round_trip_text(self):
         text = b"line one\nline two\r\nend\r"
         self.assertEqual(netascii_to_bytes(bytes_to_netascii(text)), text)
+
+    def test_translate_matches_reference_implementation(self):
+        """Bản tối ưu bằng bytes.replace phải trùng bản tham chiếu từng byte."""
+
+        def slow_encode(data: bytes) -> bytes:
+            out = bytearray()
+            for byte in data:
+                if byte == 0x0D:
+                    out += b"\r\x00"
+                elif byte == 0x0A:
+                    out += b"\r\n"
+                else:
+                    out.append(byte)
+            return bytes(out)
+
+        def slow_decode(data: bytes) -> bytes:
+            out = bytearray()
+            index = 0
+            while index < len(data):
+                byte = data[index]
+                if (
+                    byte == 0x0D
+                    and index + 1 < len(data)
+                    and data[index + 1] in (0x0A, 0x00)
+                ):
+                    out.append(0x0A if data[index + 1] == 0x0A else 0x0D)
+                    index += 2
+                    continue
+                out.append(byte)
+                index += 1
+            return bytes(out)
+
+        rng = random.Random(2026)
+        alphabet = b"\r\n\x00ab01\x7f\x80\xff"
+        for _ in range(300):
+            data = bytes(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
+            with self.subTest(data=data):
+                self.assertEqual(bytes_to_netascii(data), slow_encode(data))
+                self.assertEqual(netascii_to_bytes(data), slow_decode(data))
+                self.assertEqual(netascii_to_bytes(bytes_to_netascii(data)), data)
 
 
 class TestNetasciiStream(unittest.TestCase):

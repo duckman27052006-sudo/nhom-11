@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_errors, tftp_packet
-from src.tftp_packet import (
+from tftp import tftp_errors, tftp_packet
+from tftp.tftp_packet import (
     ACK,
     DATA,
     ERROR,

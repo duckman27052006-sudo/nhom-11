@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from src.web_upload import COOKIE, create_app, main, private_network
+    from tftp.web_upload import COOKIE, create_app, main, private_network
 except ModuleNotFoundError as exc:
     if exc.name not in {"flask", "werkzeug"}:
         raise
@@ -266,7 +266,7 @@ class WebTest(unittest.TestCase):
         def download(remote, local, **kwargs):
             Path(local).write_bytes(b"payload")
 
-        with patch("src.web_upload.TftpClient.download", side_effect=download):
+        with patch("tftp.web_upload.TftpClient.download", side_effect=download):
             for _ in range(6):
                 response = self.client.get("/api/files/data.txt", buffered=False)
                 self.assertEqual(response.status_code, 200)
@@ -280,7 +280,7 @@ class WebTest(unittest.TestCase):
         def download(remote, local, **kwargs):
             Path(local).write_bytes(b"payload")
 
-        with patch("src.web_upload.TftpClient.download", side_effect=download):
+        with patch("tftp.web_upload.TftpClient.download", side_effect=download):
             responses = []
             try:
                 for _ in range(4):
@@ -298,7 +298,7 @@ class WebTest(unittest.TestCase):
     def test_download_temporary_directory_failure_releases_capacity(self):
         self.register()
         (self.config["FILE_ROOT"] / "data.txt").write_bytes(b"x")
-        with patch("src.web_upload.tempfile.TemporaryDirectory", side_effect=OSError("disk full")):
+        with patch("tftp.web_upload.tempfile.TemporaryDirectory", side_effect=OSError("disk full")):
             with self.assertLogs("tftp.web", level="ERROR"):
                 for _ in range(5):
                     self.assertEqual(self.client.get("/api/files/data.txt").status_code, 502)
@@ -311,7 +311,7 @@ class WebTest(unittest.TestCase):
     def test_mocked_symlink_is_hidden_even_without_os_privilege(self):
         self.register()
         (self.config["FILE_ROOT"] / "linked.txt").write_text("secret")
-        with patch("src.web_upload.Path.is_symlink", return_value=True):
+        with patch("tftp.web_upload.Path.is_symlink", return_value=True):
             self.assertEqual(self.client.get("/api/files").json["files"], [])
             self.assertEqual(self.client.get("/api/files/linked.txt").status_code, 400)
 
@@ -325,7 +325,7 @@ class WebTest(unittest.TestCase):
             Path(local).write_bytes(b"x" * 1025)
             progress(1025, 1025)
 
-        with patch("src.web_upload.TftpClient.download", side_effect=too_large):
+        with patch("tftp.web_upload.TftpClient.download", side_effect=too_large):
             self.assertEqual(self.client.get("/api/files/large.txt").status_code, 413)
         for payload in [b"x" * 1025, b"x" * 70000]:
             response = self.client.post(
@@ -337,8 +337,8 @@ class WebTest(unittest.TestCase):
     def test_tftp_failure_is_reported_and_cleaned(self):
         self.register()
         (self.config["FILE_ROOT"] / "hello.txt").write_bytes(b"hello")
-        from src.tftp_errors import TftpTimeout
-        with patch("src.web_upload.TftpClient.download", side_effect=TftpTimeout()):
+        from tftp.tftp_errors import TftpTimeout
+        with patch("tftp.web_upload.TftpClient.download", side_effect=TftpTimeout()):
             with self.assertLogs("tftp.web", level="ERROR"):
                 response = self.client.get("/api/files/hello.txt")
         self.assertEqual(response.status_code, 502)

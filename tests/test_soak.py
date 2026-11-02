@@ -43,10 +43,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import enable_utf8_console, tftp_errors
-from src.tftp_client import TftpClient
-from src.tftp_packet import OP_RRQ, OP_WRQ, RRQ, unpack
 from tests.test_e2e import ServerHarness, make_payload
+from tftp import enable_utf8_console, tftp_errors
+from tftp.tftp_client import TftpClient
+from tftp.tftp_packet import OP_RRQ, OP_WRQ, RRQ, unpack
 
 enable_utf8_console()
 

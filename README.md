@@ -6,16 +6,16 @@ phần tùy chọn cần cài dependency riêng.
 
 | Thành phần | File | Nội dung |
 |---|---|---|
-| Server | `src/tftp_server.py` | Đa luồng, mỗi phiên một TID riêng, hỗ trợ đọc/ghi |
-| Client | `src/tftp_client.py` | Tải về (RRQ) và gửi lên (WRQ), có CLI |
-| Web LAN | `src/web_upload/`, `src/web_store.py` | Tài khoản, tải/gửi file và phòng chat chung (extras `[web]`) |
-| GUI | `src/tftp_gui.py`, `src/gui/` | Giao diện PySide6: `theme` (màu), `components` (vẽ bề mặt), `motion` (hiệu ứng), `main_window` (4 trang) |
-| Gói tin | `src/tftp_packet.py` | Đóng gói / giải mã RRQ, WRQ, DATA, ACK, ERROR, OACK |
-| Mã lỗi | `src/tftp_errors.py` | Bảng mã lỗi RFC 1350 + ngoại lệ |
-| Địa chỉ | `src/tftp_net.py` | Phân giải/chuẩn hóa IPv4, IPv6, zone ID, sockaddr |
-| Cấu hình | `src/tftp_config.py` | JSON strict, kiểm tra trước khi chạy |
-| Logging | `src/tftp_logging.py` | Log rotation dùng stdlib |
-| Số liệu | `src/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
+| Server | `tftp/tftp_server.py` | Đa luồng, mỗi phiên một TID riêng, hỗ trợ đọc/ghi |
+| Client | `tftp/tftp_client.py` | Tải về (RRQ) và gửi lên (WRQ), có CLI |
+| Web LAN | `tftp/web_upload/`, `tftp/web_store.py` | Tài khoản, tải/gửi file và phòng chat chung (extras `[web]`) |
+| GUI | `tftp/tftp_gui.py`, `tftp/gui/` | Giao diện PySide6: `theme` (màu), `components` (vẽ bề mặt), `motion` (hiệu ứng), `main_window` (4 trang) |
+| Gói tin | `tftp/tftp_packet.py` | Đóng gói / giải mã RRQ, WRQ, DATA, ACK, ERROR, OACK |
+| Mã lỗi | `tftp/tftp_errors.py` | Bảng mã lỗi RFC 1350 + ngoại lệ |
+| Địa chỉ | `tftp/tftp_net.py` | Phân giải/chuẩn hóa IPv4, IPv6, zone ID, sockaddr |
+| Cấu hình | `tftp/tftp_config.py` | JSON strict, kiểm tra trước khi chạy |
+| Logging | `tftp/tftp_logging.py` | Log rotation dùng stdlib |
+| Số liệu | `tftp/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
 | Test | `tests/` | Unit + tích hợp + fuzz + soak, gồm IPv4/IPv6 |
 
 ## 1. Cài đặt
@@ -36,7 +36,7 @@ python -m pip install -e ".[gui]"     # hoặc: python -m pip install PySide6
 ## 1b. Giao diện đồ hoá (GUI)
 
 ```bash
-python -m src.tftp_gui
+python -m tftp.tftp_gui
 ```
 
 Bố cục chia **4 trang** để không dồn hết chức năng vào một màn hình:
@@ -52,7 +52,7 @@ Chi tiết ngôn ngữ thiết kế xem `GUI_REDESIGN.md`.
 
 Phím tắt: `Ctrl+L` xóa nhật ký · `Ctrl+K` dừng server.
 
-Hiệu ứng (tất cả nằm gọn trong `src/gui/motion.py`): chuyển trang trôi nhẹ từ
+Hiệu ứng (tất cả nằm gọn trong `tftp/gui/motion.py`): chuyển trang trôi nhẹ từ
 dưới lên, cửa sổ mờ dần khi mở, chấm trạng thái nhịp thở, thanh tiến trình
 shimmer khi chưa rõ tổng, ô số liệu đếm tăng dần, toast góc phải dưới.
 
@@ -63,7 +63,7 @@ shimmer khi chưa rõ tổng, ô số liệu đếm tăng dần, toast góc ph�
 > trình) tự vẽ bằng `QPainter`. Nhờ vậy cả hai theme sáng/tối đều hiển thị đúng.
 
 > Server và client chạy ở thread riêng, nên giao diện không bao giờ treo khi đang
-> truyền file. Mã lõi (`src/tftp_*.py`) không phụ thuộc PySide6.
+> truyền file. Mã lõi (`tftp/tftp_*.py`) không phụ thuộc PySide6.
 
 ## 2. Chạy thử nhanh (2 cửa sổ terminal)
 
@@ -79,10 +79,10 @@ Mở hai terminal tại thư mục repository:
 
 ```powershell
 # Terminal 1: TFTP server; mặc định không ghi đè file trùng tên
-python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files
+python -m tftp.tftp_server --host 127.0.0.1 --port 6969 --root files
 
 # Terminal 2: chạy thử trên máy này
-python -m src.web_upload --host 127.0.0.1 --port 8080 --root files
+python -m tftp.web_upload --host 127.0.0.1 --port 8080 --root files
 ```
 
 Mở `http://127.0.0.1:8080`, tạo tài khoản để xem/gửi/tải file và trò chuyện trong
@@ -93,7 +93,7 @@ Cho điện thoại/máy khác cùng LAN truy cập: thay lệnh terminal 2 bằ
 (đổi IP/subnet mẫu thành mạng thực tế, xem `ipconfig`):
 
 ```powershell
-python -m src.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --root files
+python -m tftp.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --root files
 ```
 
 Thiết bị cùng mạng mở `http://192.168.1.10:8080`. Cho phép TCP 8080 trong firewall
@@ -106,7 +106,7 @@ HTTP LAN không mã hóa; chỉ dùng trong mạng tin cậy. Hướng dẫn đ�
 ### Cửa sổ 1 — khởi động server
 
 ```bash
-python -m src.tftp_server --host 0.0.0.0 --port 6969 --root files -v
+python -m tftp.tftp_server --host 0.0.0.0 --port 6969 --root files -v
 ```
 
 ```
@@ -116,14 +116,14 @@ python -m src.tftp_server --host 0.0.0.0 --port 6969 --root files -v
 ### Cửa sổ 2 — tải file về (RRQ)
 
 ```bash
-python -m src.tftp_client --server 127.0.0.1:6969 --get sample.bin --save sample_copy.bin
-python -m src.tftp_client --server 127.0.0.1:6969 --get hello.txt --blocksize 1468
+python -m tftp.tftp_client --server 127.0.0.1:6969 --get sample.bin --save sample_copy.bin
+python -m tftp.tftp_client --server 127.0.0.1:6969 --get hello.txt --blocksize 1468
 ```
 
 ### Cửa sổ 2 — gửi file lên (WRQ)
 
 ```bash
-python -m src.tftp_client --server 127.0.0.1:6969 --put sample_copy.bin --remote uploaded.bin
+python -m tftp.tftp_client --server 127.0.0.1:6969 --put sample_copy.bin --remote uploaded.bin
 ```
 
 Kiểm tra kết quả: `files/uploaded.bin` sẽ xuất hiện với nội dung giống hệt `files/sample.bin`.
@@ -141,7 +141,7 @@ rồi mở thẳng giao diện **TFTP Console** (không còn menu terminal).
 Cũng có thể mở trực tiếp từ thư mục dự án:
 
 ```bash
-python -m src.tftp_gui
+python -m tftp.tftp_gui
 ```
 
 ## 4. Tham số CLI
@@ -215,14 +215,14 @@ Mã thoát: `0` thành công, `1` lỗi TFTP (ERROR của server, timeout...), `
 
 ```bash
 # Server chỉ IPv6 loopback
-python -m src.tftp_server --host ::1 --family ipv6 --root files
+python -m tftp.tftp_server --host ::1 --family ipv6 --root files
 
 # Server dual-stack: IPv4 0.0.0.0 và IPv6 :: trên cùng port
-python -m src.tftp_server --host 0.0.0.0 --host6 :: --family dual --port 6969
+python -m tftp.tftp_server --host 0.0.0.0 --host6 :: --family dual --port 6969
 
 # Client IPv6 (global hoặc link-local kèm zone)
-python -m src.tftp_client --server "[2001:db8::10]:6969" --get sample.bin
-python -m src.tftp_client --server "[fe80::1%12]:6969" --family ipv6 --get sample.bin
+python -m tftp.tftp_client --server "[2001:db8::10]:6969" --get sample.bin
+python -m tftp.tftp_client --server "[fe80::1%12]:6969" --family ipv6 --get sample.bin
 ```
 
 - Mỗi phiên server tạo socket TID cùng họ địa chỉ với listener; reply luôn về
@@ -244,7 +244,7 @@ các giới hạn và chính sách ghi đè của server vẫn được áp dụ
 
 ```powershell
 python -m pip install -e ".[web]"
-python -m src.web_upload `
+python -m tftp.web_upload `
   --host 192.168.1.10 `
   --port 8080 `
   --allowed-network 192.168.1.0/24 `
@@ -276,8 +276,8 @@ TFTP cũng không mã hóa: không chuyển tiếp cổng từ Internet. Cấu h
 ## 5. Dùng như thư viện
 
 ```python
-from src.tftp_client import TftpClient
-from src.tftp_server import TftpServer
+from tftp.tftp_client import TftpClient
+from tftp.tftp_server import TftpServer
 import threading
 
 server = TftpServer("127.0.0.1", 6969, root="files", timeout=5, retries=5)
@@ -350,9 +350,9 @@ TFTP_SKIP_SOAK=1 python -m unittest discover      # bỏ qua soak khi cần ch�
 ## 7. Đo đạc vận hành
 
 ```bash
-python -m src.tftp_server --stats-interval 60        # in số liệu mỗi 60s
-python -m src.tftp_server --stats-json metrics.json   # xuất JSON khi dừng
-python -m src.tftp_client --get big.bin --stats       # in số liệu client
+python -m tftp.tftp_server --stats-interval 60        # in số liệu mỗi 60s
+python -m tftp.tftp_server --stats-json metrics.json   # xuất JSON khi dừng
+python -m tftp.tftp_client --get big.bin --stats       # in số liệu client
 ```
 
 Mỗi bên đo: số phiên (bắt đầu / hoàn tất / timeout), số gói tin gửi-nhận,

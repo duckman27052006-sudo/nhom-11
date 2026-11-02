@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.tftp_config import ConfigError, from_mapping, load_config
-from src.tftp_logging import setup_logging
+from tftp.tftp_config import ConfigError, from_mapping, load_config
+from tftp.tftp_logging import setup_logging
 
 
 class TestConfig(unittest.TestCase):
@@ -81,7 +81,7 @@ class TestConfig(unittest.TestCase):
 
 class TestConfigCli(unittest.TestCase):
     def test_cli_quota_and_eviction_options(self):
-        from src import tftp_server
+        from tftp import tftp_server
 
         args = tftp_server.build_arg_parser().parse_args(
             ["--max-total-bytes", "1024", "--no-evict-oldest"]
@@ -91,7 +91,7 @@ class TestConfigCli(unittest.TestCase):
         self.assertFalse(config.evict_oldest)
 
     def test_check_config_cli(self):
-        from src import tftp_server
+        from tftp import tftp_server
 
         with tempfile.TemporaryDirectory() as out:
             code = tftp_server.main(
@@ -108,7 +108,7 @@ class TestConfigCli(unittest.TestCase):
             self.assertEqual(code, 0)
 
     def test_check_config_rejects_bad_port(self):
-        from src import tftp_server
+        from tftp import tftp_server
 
         with tempfile.TemporaryDirectory() as out:
             code = tftp_server.main(
@@ -117,7 +117,7 @@ class TestConfigCli(unittest.TestCase):
             self.assertEqual(code, 2)
 
     def test_check_config_file(self):
-        from src import tftp_server
+        from tftp import tftp_server
 
         with tempfile.TemporaryDirectory() as out:
             path = Path(out) / "server.json"

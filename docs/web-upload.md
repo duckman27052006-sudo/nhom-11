@@ -15,17 +15,17 @@ python -m pip install -e ".[web]"
 Terminal thứ nhất:
 
 ```powershell
-python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files
+python -m tftp.tftp_server --host 127.0.0.1 --port 6969 --root files
 ```
 
 Terminal thứ hai, chạy thử trên cùng máy:
 
 ```powershell
-python -m src.web_upload --host 127.0.0.1 --port 8080 --root files
+python -m tftp.web_upload --host 127.0.0.1 --port 8080 --root files
 ```
 
 Mở `http://127.0.0.1:8080`. Có thể dùng entry point `tftp-web-upload` thay cho
-`python -m src.web_upload` sau khi cài package.
+`python -m tftp.web_upload` sau khi cài package.
 
 ## Cho thiết bị cùng LAN truy cập
 
@@ -33,7 +33,7 @@ Chạy `ipconfig`, lấy IPv4 và subnet của card Wi-Fi/Ethernet đang dùng. 
 máy chủ có IP `192.168.1.10`, subnet mask `255.255.255.0`:
 
 ```powershell
-python -m src.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --tftp-server 127.0.0.1:6969 --root files
+python -m tftp.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --tftp-server 127.0.0.1:6969 --root files
 ```
 
 Thiết bị cùng LAN mở `http://192.168.1.10:8080`. Cho phép TCP 8080 trong Windows

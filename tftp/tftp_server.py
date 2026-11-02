@@ -8,7 +8,7 @@ Kiến trúc:
 
 Chạy server::
 
-    python -m src.tftp_server --host 0.0.0.0 --port 6969 --root files
+    python -m tftp.tftp_server --host 0.0.0.0 --port 6969 --root files
 """
 
 from __future__ import annotations
@@ -1504,7 +1504,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="python -m src.tftp_server",
+        prog="python -m tftp.tftp_server",
         description="TFTP server đa luồng theo RFC 1350.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

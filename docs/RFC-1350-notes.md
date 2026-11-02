@@ -23,7 +23,7 @@ Tất cả số nguyên dùng **network byte order (big-endian)**, `struct.pack(
 | 5 | ERROR |
 | 6 | OACK (RFC 2347) |
 
-Code: `src/tftp_packet.py` — các lớp `RRQ`, `WRQ`, `DATA`, `ACK`, `ERROR`, `OACK`.
+Code: `tftp/tftp_packet.py` — các lớp `RRQ`, `WRQ`, `DATA`, `ACK`, `ERROR`, `OACK`.
 
 ## 2. Well-known port và TID (RFC 1350 §4.2)
 
@@ -171,11 +171,11 @@ Các mẫu cần thấy:
 
 ## 10. Đo đạc
 
-Server và client đều tích hợt sẵn registry metrics (`src/tftp_metrics.py`):
+Server và client đều tích hợt sẵn registry metrics (`tftp/tftp_metrics.py`):
 đếm phiên, gói tin, retry, byte; đo RTT, thời gian phiên, TTFB với p50/p95/p99.
 
 ```bash
-python -m src.tftp_server --stats-interval 60 --stats-json metrics.json
+python -m tftp.tftp_server --stats-interval 60 --stats-json metrics.json
 ```
 
 Danh mục chỉ số và công thức tính: [`docs/observability.md`](observability.md).

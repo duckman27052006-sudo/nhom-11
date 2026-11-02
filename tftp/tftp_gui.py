@@ -2,7 +2,7 @@
 
 Chạy::
 
-    python -m src.tftp_gui
+    python -m tftp.tftp_gui
 """
 
 from __future__ import annotations

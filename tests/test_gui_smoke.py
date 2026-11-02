@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - thiếu extras [gui]
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from src.gui.main_window import MainWindow  # noqa: E402
+from tftp.gui.main_window import MainWindow  # noqa: E402
 
 
 def pump(app: QApplication, seconds: float = 0.0) -> None:

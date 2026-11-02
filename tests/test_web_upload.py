@@ -14,11 +14,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_errors
-from src.tftp_server import TftpServer
+from tftp import tftp_errors
+from tftp.tftp_server import TftpServer
 
 try:
-    from src.web_upload import COOKIE, UploadConfigError, create_app, validate_bind_host
+    from tftp.web_upload import COOKIE, UploadConfigError, create_app, validate_bind_host
 except ModuleNotFoundError as exc:
     if exc.name not in {"flask", "werkzeug"}:
         raise
@@ -94,7 +94,7 @@ class TestWebUpload(unittest.TestCase):
                 staged_paths.append(Path(local))
                 (tftp_root / remote).write_bytes(Path(local).read_bytes())
 
-        with patch("src.web_upload.TftpClient", FakeTftpClient):
+        with patch("tftp.web_upload.TftpClient", FakeTftpClient):
             response = self.client.post(
                 "/api/upload",
                 data={"file": (bytes_file("report.txt", b"hello"), "report.txt")},
@@ -154,7 +154,7 @@ class TestWebUpload(unittest.TestCase):
         def reject_duplicate(_local, _remote):
             raise tftp_errors.TftpRemoteError(tftp_errors.ERR_FILE_EXISTS, "file already exists")
 
-        with patch("src.web_upload.TftpClient") as tftp_client:
+        with patch("tftp.web_upload.TftpClient") as tftp_client:
             tftp_client.return_value.upload.side_effect = reject_duplicate
             response = self.client.post(
                 "/api/upload",
@@ -167,7 +167,7 @@ class TestWebUpload(unittest.TestCase):
         self.assertIn("TFTP server", response.json["error"])
 
     def test_tftp_timeout_is_reported_as_gateway_timeout(self):
-        with patch("src.web_upload.TftpClient") as tftp_client:
+        with patch("tftp.web_upload.TftpClient") as tftp_client:
             tftp_client.return_value.upload.side_effect = tftp_errors.TftpTimeout("server timeout")
             response = self.client.post(
                 "/api/upload",
@@ -199,7 +199,7 @@ class TestWebUpload(unittest.TestCase):
                 self.assertEqual(response.status_code, 403)
 
     def test_upload_size_limit_and_temporary_cleanup(self):
-        with patch("src.web_upload.TftpClient") as tftp_client:
+        with patch("tftp.web_upload.TftpClient") as tftp_client:
             response = self.client.post(
                 "/api/upload",
                 data={"file": (bytes_file("large.bin", b"x" * 2048), "large.bin")},
@@ -250,7 +250,7 @@ class TestWebUpload(unittest.TestCase):
                     )
                 )
 
-        with patch("src.web_upload.TftpClient", BlockingTftpClient):
+        with patch("tftp.web_upload.TftpClient", BlockingTftpClient):
             worker = threading.Thread(target=first_upload)
             worker.start()
             try:

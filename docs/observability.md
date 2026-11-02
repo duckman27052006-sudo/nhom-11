@@ -9,10 +9,10 @@
 
 ```bash
 # In bảng số liệu mỗi 60 giây
-python -m src.tftp_server --stats-interval 60
+python -m tftp.tftp_server --stats-interval 60
 
 # Ghi số liệu ra JSON khi dừng (Ctrl+C hoặc SIGTERM)
-python -m src.tftp_server --stats-json metrics.json
+python -m tftp.tftp_server --stats-json metrics.json
 ```
 
 Mẫu log:
@@ -33,8 +33,8 @@ tftp.server | chạy 3600.4s
 ### Client
 
 ```bash
-python -m src.tftp_client --get big.bin --save big.bin --stats
-python -m src.tftp_client --get big.bin --save big.bin --stats-json client.json
+python -m tftp.tftp_client --get big.bin --save big.bin --stats
+python -m tftp.tftp_client --get big.bin --save big.bin --stats-json client.json
 ```
 
 ### Thư viện
@@ -49,9 +49,9 @@ data = server.metrics.snapshot()        # dict để đẩy vào hệ thống me
 vào; muốn gộp chung thì:
 
 ```python
-from src.tftp_metrics import Metrics
-from src.tftp_client import TftpClient
-from src.tftp_server import TftpServer
+from tftp.tftp_metrics import Metrics
+from tftp.tftp_client import TftpClient
+from tftp.tftp_server import TftpServer
 
 shared = Metrics("tftp")                     # server + client dùng chung
 TftpServer(root="files", metrics=shared)

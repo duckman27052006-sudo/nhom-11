@@ -15,9 +15,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_errors
-from src.tftp_client import TftpClient
-from src.tftp_net import (
+from tftp import tftp_errors
+from tftp.tftp_client import TftpClient
+from tftp.tftp_net import (
     address_key,
     format_endpoint,
     format_sockaddr,
@@ -26,7 +26,7 @@ from src.tftp_net import (
     resolve_addresses,
     split_family_hosts,
 )
-from src.tftp_server import TftpServer
+from tftp.tftp_server import TftpServer
 
 QUIET = logging.getLogger("tftp.net.test")
 QUIET.setLevel(logging.CRITICAL)
@@ -215,7 +215,7 @@ class TestWritePolicy(unittest.TestCase):
                 source = str(Path(out) / "new.bin")
                 Path(source).write_bytes(b"payload")
                 with mock.patch(
-                    "src.tftp_server.os.link", side_effect=OSError("hard links unsupported")
+                    "tftp.tftp_server.os.link", side_effect=OSError("hard links unsupported")
                 ):
                     with self.assertRaises(tftp_errors.TftpRemoteError):
                         TftpClient(
@@ -254,7 +254,7 @@ class TestWritePolicy(unittest.TestCase):
             with tempfile.TemporaryDirectory() as out:
                 target = Path(out) / "download.bin"
                 with mock.patch(
-                    "src.tftp_client.os.link", side_effect=OSError("hard links unsupported")
+                    "tftp.tftp_client.os.link", side_effect=OSError("hard links unsupported")
                 ):
                     with self.assertRaises(OSError):
                         TftpClient(

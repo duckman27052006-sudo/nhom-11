@@ -13,10 +13,10 @@ web = ["Flask>=3.1,<4", "waitress>=3.0,<4"]
 dev = ["ruff>=0.5", "mypy>=1.5"]
 
 [project.scripts]
-tftp-server = "src.tftp_server:main"
-tftp-client = "src.tftp_client:main"
-tftp-gui = "src.tftp_gui:main"
-tftp-web-upload = "src.web_upload:main"
+tftp-server = "tftp.tftp_server:main"
+tftp-client = "tftp.tftp_client:main"
+tftp-gui = "tftp.tftp_gui:main"
+tftp-web-upload = "tftp.web_upload:main"
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -24,10 +24,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["tftp*"]
 
 [tool.setuptools.package-data]
-"src.web_upload" = ["templates/*.html", "static/*.css", "static/*.js"]
+"tftp.web_upload" = ["templates/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

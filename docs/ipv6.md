@@ -14,13 +14,13 @@ trên Windows/Linux và để mỗi phiên chọn đúng family cho TID.
 
 ```bash
 # IPv4 only
-python -m src.tftp_server --host 0.0.0.0 --family ipv4 --port 6969
+python -m tftp.tftp_server --host 0.0.0.0 --family ipv4 --port 6969
 
 # IPv6 only
-python -m src.tftp_server --host ::1 --family ipv6 --port 6969
+python -m tftp.tftp_server --host ::1 --family ipv6 --port 6969
 
 # Dual-stack
-python -m src.tftp_server --host 0.0.0.0 --host6 :: --family dual --port 6969
+python -m tftp.tftp_server --host 0.0.0.0 --host6 :: --family dual --port 6969
 ```
 
 Server log và GUI hiển thị đúng địa chỉ đã bind, ví dụ `[::1]:6969`; không dùng
@@ -46,16 +46,16 @@ Lấy interface index:
 
 ```bash
 # DNS có cả A và AAAA: auto thử lần lượt
-python -m src.tftp_client --server tftp.example.lan:6969 --get image.bin
+python -m tftp.tftp_client --server tftp.example.lan:6969 --get image.bin
 
 # Ép IPv6
-python -m src.tftp_client --server "[2001:db8::10]:6969" --family ipv6 --get image.bin
+python -m tftp.tftp_client --server "[2001:db8::10]:6969" --family ipv6 --get image.bin
 
 # Link-local
-python -m src.tftp_client --server "[fe80::1%12]:6969" --family ipv6 --get image.bin
+python -m tftp.tftp_client --server "[fe80::1%12]:6969" --family ipv6 --get image.bin
 
 # Đặt hạn tổng và cho phép ghi đè file đích
-python -m src.tftp_client --server "[::1]:6969" --get a.bin --total-timeout 120 --overwrite
+python -m tftp.tftp_client --server "[::1]:6969" --get a.bin --total-timeout 120 --overwrite
 ```
 
 Hành vi:

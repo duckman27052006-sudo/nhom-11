@@ -2,14 +2,14 @@
 
 Cách dùng như thư viện::
 
-    from src.tftp_client import TftpClient
+    from tftp.tftp_client import TftpClient
     TftpClient("127.0.0.1", 6969).download("hello.txt", "out/hello.txt")
     TftpClient("127.0.0.1", 6969).upload("out/hello.txt", "hello.txt")
 
 Cách dùng trên dòng lệnh::
 
-    python -m src.tftp_client --server 127.0.0.1:6969 --get hello.txt --save out.txt
-    python -m src.tftp_client --server 127.0.0.1:6969 --put out.txt --remote hello.txt
+    python -m tftp.tftp_client --server 127.0.0.1:6969 --get hello.txt --save out.txt
+    python -m tftp.tftp_client --server 127.0.0.1:6969 --put out.txt --remote hello.txt
 """
 
 from __future__ import annotations
@@ -586,7 +586,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="python -m src.tftp_client",
+        prog="python -m tftp.tftp_client",
         description="TFTP client theo RFC 1350: tải file (--get) hoặc gửi file (--put).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

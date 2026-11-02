@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_client, tftp_errors, tftp_packet
-from src.tftp_client import TftpClient
-from src.tftp_packet import DATA, OP_ACK, OP_RRQ, RRQ, unpack
-from src.tftp_server import TftpServer
+from tftp import tftp_client, tftp_errors, tftp_packet
+from tftp.tftp_client import TftpClient
+from tftp.tftp_packet import DATA, OP_ACK, OP_RRQ, RRQ, unpack
+from tftp.tftp_server import TftpServer
 
 QUIET = logging.getLogger("tftp.test")
 QUIET.setLevel(logging.CRITICAL)
@@ -543,7 +543,7 @@ class TestCommandLine(unittest.TestCase):
         import json
         from unittest import mock
 
-        from src import tftp_server
+        from tftp import tftp_server
 
         with tempfile.TemporaryDirectory() as out:
             stats_path = str(Path(out) / "server-stats.json")
@@ -569,7 +569,7 @@ class TestCommandLine(unittest.TestCase):
             self.assertIn("timers", data)
 
     def test_cli_rejects_unwritable_log_path(self):
-        from src import tftp_server
+        from tftp import tftp_server
 
         bad_path = Path(tempfile.gettempdir()) / "khong-tao-duoc-nay" / ("x" * 3) / "log.txt"
         code = tftp_server.main(

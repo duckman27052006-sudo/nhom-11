@@ -15,11 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_packet
-from src.tftp_client import TftpClient, build_arg_parser, validate_direction_args
-from src.tftp_errors import TftpFormatError, TftpIllegalOperation
-from src.tftp_metrics import Timer
-from src.tftp_packet import (
+from tests.test_e2e import ServerHarness, make_payload
+from tftp import tftp_packet
+from tftp.tftp_client import TftpClient, build_arg_parser, validate_direction_args
+from tftp.tftp_errors import TftpFormatError, TftpIllegalOperation
+from tftp.tftp_metrics import Timer
+from tftp.tftp_packet import (
     ACK,
     DATA,
     ERROR,
@@ -30,7 +31,6 @@ from src.tftp_packet import (
     bytes_to_netascii,
     unpack,
 )
-from tests.test_e2e import ServerHarness, make_payload
 
 
 def _udp(timeout: float = 3.0) -> socket.socket:

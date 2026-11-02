@@ -50,9 +50,9 @@ echo  Giu ca hai cua so dich vu dang chay de nhan file.
 echo.
 
 rem --- Khoi dong GUI TFTP va web gateway trong hai cua so rieng ---
-start "TFTP Console" "%PY%" -m src.tftp_gui
+start "TFTP Console" "%PY%" -m tftp.tftp_gui
 if errorlevel 1 goto launch_error
-start "TFTP Web Upload" "%PY%" -m src.web_upload --host "%LAN_HOST%" --port 8080 --allowed-network "%LAN_CIDR%" --tftp-server 127.0.0.1:6969
+start "TFTP Web Upload" "%PY%" -m tftp.web_upload --host "%LAN_HOST%" --port 8080 --allowed-network "%LAN_CIDR%" --tftp-server 127.0.0.1:6969
 if errorlevel 1 goto launch_error
 echo  Hay giu cac cua so TFTP Console va TFTP Web Upload dang chay.
 echo.

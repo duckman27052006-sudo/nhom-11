@@ -50,7 +50,7 @@ ngẫu nhiên sau RRQ/WRQ, nên chỉ mở port 6969 là chưa đủ.
 Kiểm tra trước khi chạy:
 
 ```bash
-python -m src.tftp_server --config server.json --check-config
+python -m tftp.tftp_server --config server.json --check-config
 ```
 
 Lệnh trên in cấu hình hiệu lực và thoát với mã `0` nếu hợp lệ. Khóa lạ, sai kiểu,
@@ -132,7 +132,7 @@ journalctl -u tftp-server -f
 Dùng NSSM hoặc công cụ tương đương, vì repo không phụ thuộc `pywin32`:
 
 ```powershell
-nssm install TftpServer "C:\Python311\python.exe" "-m src.tftp_server --config C:\ProgramData\TftpServer\server.json"
+nssm install TftpServer "C:\Python311\python.exe" "-m tftp.tftp_server --config C:\ProgramData\TftpServer\server.json"
 nssm set TftpServer AppDirectory "C:\baitap\Trivial File Transfer Protocol"
 nssm set TftpServer ObjectName ".\svc-tftp" "<mật-khẩu>"
 nssm set TftpServer Start SERVICE_AUTO_START
@@ -156,8 +156,8 @@ Server chỉ được coi là sẵn sàng khi:
 Kiểm tra nhanh từ máy client:
 
 ```bash
-python -m src.tftp_client --server 10.20.0.10:6969 --get ping.bin --timeout 2
-python -m src.tftp_client --server "[2001:db8:20::10]:6969" --family ipv6 --get ping.bin --timeout 2
+python -m tftp.tftp_client --server 10.20.0.10:6969 --get ping.bin --timeout 2
+python -m tftp.tftp_client --server "[2001:db8:20::10]:6969" --family ipv6 --get ping.bin --timeout 2
 ```
 
 ## 7. Nâng cấp và rollback

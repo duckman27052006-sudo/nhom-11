@@ -8,7 +8,7 @@
 > chạy riêng bộ soak. Vẫn còn một khoảng trống thuần lý thuyết: chưa có kiểm thử
 > chéo với TFTP client/server của bên thứ ba.
 > Trạng thái kiểm tra: `python -m unittest discover` → **166 test PASS**,
-> `ruff check .` → **sạch**, `mypy src` → **sạch**.
+> `ruff check .` → **sạch**, `mypy tftp` → **sạch**.
 
 ---
 
@@ -24,7 +24,7 @@ Project này đã đi từ trạng thái “có logic nhưng còn nhiều bug RF
 |---|---|---|
 | 1 | Soak / stress test | `tests/test_soak.py` — 11 test, file 16 MiB mặc định, 70 000+ block, 24 client song song, proxy mất 20% gói, kiểm tra rò rỉ |
 | 2 | Fuzz / malformed packet | `tests/test_fuzz.py` — 21 test: corpus cố định + fuzz có seed (3 tầng) + fuzz tên file + fuzz netascii + fuzz qua socket thật |
-| 3 | Metrics / observability | `src/tftp_metrics.py` + gắn vào server & client, `--stats-interval` / `--stats-json`, `docs/observability.md` |
+| 3 | Metrics / observability | `tftp/tftp_metrics.py` + gắn vào server & client, `--stats-interval` / `--stats-json`, `docs/observability.md` |
 
 ### Bug thật phát hiện được nhờ test mới
 
@@ -102,7 +102,7 @@ Hiện tại project có:
 |---|---|
 | 1. Soak / stress test file rất lớn | ✅ `tests/test_soak.py` — 16 MiB mặc định (nâng được lên 100 MiB+ qua `TFTP_SOAK_MB`), 70 000+ block wrap nhiều vòng |
 | 2. Fuzzing / malformed packet | ✅ `tests/test_fuzz.py` — corpus 35 gói hỏng + fuzz có seed (byte ngẫu nhiên, ép opcode, biến thể gói hợp lệ) + fuzz tên file + fuzz netascii + ném rác vào server thật |
-| 3. Monitoring / observability | ✅ `src/tftp_metrics.py`, CLI `--stats-interval` / `--stats` / `--stats-json`, `docs/observability.md` |
+| 3. Monitoring / observability | ✅ `tftp/tftp_metrics.py`, CLI `--stats-interval` / `--stats` / `--stats-json`, `docs/observability.md` |
 | 5. Tải cao + nhiều client đồng thời | ✅ 24 client song song mặc định, đọc/ghi trộn, kiểm tra `--max-clients` có thực sự từ chối, proxy mất 20% gói |
 
 ### Vùng còn lại
@@ -114,7 +114,7 @@ Hiện tại project có:
    testing ở mức sản phẩm.
 3. Chưa có tracing phân tán (chỉ có metrics), và chưa xuất metrics theo chuẩn
    Prometheus/OpenTelemetry — hiện là JSON + log, đủ dùng nhưng chưa plug-and-play.
-4. Cổng web upload đã có (`src/web_upload.py`) nhưng mới kiểm bằng test nội bộ;
+4. Cổng web upload đã có (`tftp/web_upload.py`) nhưng mới kiểm bằng test nội bộ;
    chưa có kiểm thử xuyên trình duyệt (Playwright) hay quét bảo mật HTTP.
 
 ---
@@ -163,7 +163,7 @@ Ba khuyến nghị của đợt review đầu **đã được thực hiện xong
 
 1. ✅ soak test file lớn + hàng chục client đồng thời → `tests/test_soak.py`
 2. ✅ malformed packet test / fuzz coverage → `tests/test_fuzz.py`
-3. ✅ metrics và log phân tích latency / retry / fail rate → `src/tftp_metrics.py` + `docs/observability.md`
+3. ✅ metrics và log phân tích latency / retry / fail rate → `tftp/tftp_metrics.py` + `docs/observability.md`
 
 Nếu muốn đi tiếp một bước nữa, thứ tự đáng làm là:
 

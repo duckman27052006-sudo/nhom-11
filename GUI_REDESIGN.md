@@ -1,11 +1,11 @@
 # GUI Redesign — TFTP Console (PySide6)
 
-> Tài liệu đặc tả làm lại giao diện. **Chỉ đổi lớp trình bày** (`src/gui/`,
-> `src/tftp_gui.py`); logic TFTP (`tftp_client/server/packet/errors`), worker,
+> Tài liệu đặc tả làm lại giao diện. **Chỉ đổi lớp trình bày** (`tftp/gui/`,
+> `tftp/tftp_gui.py`); logic TFTP (`tftp_client/server/packet/errors`), worker,
 > thread, signal/slot giữ nguyên API. Không thêm dependency mới.
 
 Cơ sở đánh giá: skill `redesign-existing-projects` (audit typography, màu,
-layout, trạng thái, component, icon), đã đối chiếu toàn bộ `src/gui/`
+layout, trạng thái, component, icon), đã đối chiếu toàn bộ `tftp/gui/`
 (`theme.py`, `components.py`, `main_window.py` ~1.370 dòng, `motion.py`,
 `logging_bridge.py`, `tftp_gui.py`) + 2 ảnh chụp màn hình do người dùng cung cấp.
 
@@ -259,7 +259,7 @@ lệch nhau):
 | P3 | Motion v2 (§6) + copywriting (§7) | `motion.py`, `main_window.py` | Resize giữa slide không kẹt |
 | P4 | README/docs cập nhật ảnh mới | `README.md`, `docs/` | — |
 
-Sau mỗi phase: `ruff check src` + `python -m unittest discover` (giữ toàn bộ 166
+Sau mỗi phase: `ruff check tftp` + `python -m unittest discover` (giữ toàn bộ 166
 test xanh) + smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
 
 **Ràng buộc bất biến**: QPainter+QPalette (không QSS toàn cục); Fusion style;

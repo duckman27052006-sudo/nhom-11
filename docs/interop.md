@@ -27,10 +27,10 @@ sudo tftpd-hpa --version
 sudo systemctl restart tftpd-hpa
 
 # Client dự án -> tftpd-hpa
-python -m src.tftp_client --server 127.0.0.1:69 --get test.bin --save out.bin -v
+python -m tftp.tftp_client --server 127.0.0.1:69 --get test.bin --save out.bin -v
 
 # tftp-hpa client -> server dự án
-python -m src.tftp_server --host 0.0.0.0 --port 6969 --root /tmp/tftp-root --overwrite -v
+python -m tftp.tftp_server --host 0.0.0.0 --port 6969 --root /tmp/tftp-root --overwrite -v
 tftp 127.0.0.1 6969 -c put local.bin remote.bin
 tftp 127.0.0.1 6969 -c get remote.bin back.bin
 ```
@@ -49,8 +49,8 @@ bản hỗ trợ.
 
 ## 4. Điểm đã đối chiếu trong code
 
-- RRQ/WRQ, DATA, ACK, ERROR, OACK: `src/tftp_packet.py`.
-- TID và replay request trùng: `src/tftp_server.py` (`Session`, `_handle_datagram`).
+- RRQ/WRQ, DATA, ACK, ERROR, OACK: `tftp/tftp_packet.py`.
+- TID và replay request trùng: `tftp/tftp_server.py` (`Session`, `_handle_datagram`).
 - Kết thúc file theo độ dài trên dây, kể cả file đúng bội blksize.
 - Option `blksize` (RFC 2348), `timeout`/`tsize` (RFC 2349), OACK (RFC 2347).
 - Ghi chú chi tiết: `docs/RFC-1350-notes.md`.

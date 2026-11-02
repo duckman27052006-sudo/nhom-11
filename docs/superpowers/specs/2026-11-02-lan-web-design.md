@@ -16,7 +16,7 @@ kết nối Internet, không phù hợp phạm vi LAN đã chọn).
 ## Thành phần và vận hành
 
 - Gateway dùng Flask và Waitress, được cài qua extras `[web]` và chạy bằng
-  `python -m src.web_upload`. Dependency web không ảnh hưởng CLI/GUI hiện tại.
+  `python -m tftp.web_upload`. Dependency web không ảnh hưởng CLI/GUI hiện tại.
 - Backend, template và static assets tách khỏi giao thức TFTP và trang Pages.
 - Mặc định bind `127.0.0.1:8080`; hỗ trợ IP LAN cụ thể và allowlist subnet.
   Người quản lý chạy TFTP server riêng, chỉ định địa chỉ TFTP và thư mục root

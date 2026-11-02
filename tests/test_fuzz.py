@@ -33,9 +33,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import tftp_errors, tftp_packet
-from src.tftp_client import TftpClient
-from src.tftp_packet import (
+from tests.test_e2e import ServerHarness, make_payload
+from tftp import tftp_errors, tftp_packet
+from tftp.tftp_client import TftpClient
+from tftp.tftp_packet import (
     ACK,
     DATA,
     ERROR,
@@ -50,8 +51,7 @@ from src.tftp_packet import (
     netascii_to_bytes,
     unpack,
 )
-from src.tftp_server import TftpServer
-from tests.test_e2e import ServerHarness, make_payload
+from tftp.tftp_server import TftpServer
 
 QUIET = logging.getLogger("tftp.fuzz")
 QUIET.setLevel(logging.CRITICAL)

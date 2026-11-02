@@ -273,6 +273,7 @@ class TestWritePolicy(unittest.TestCase):
 
 class TestQuotaPolicy(unittest.TestCase):
     def _start_server(self, root: str, **kwargs):
+        kwargs.setdefault("final_ack_dally", 0.0)
         server = TftpServer(
             host="127.0.0.1",
             port=0,
@@ -317,7 +318,7 @@ class TestQuotaPolicy(unittest.TestCase):
             newer.write_bytes(b"next")
             os.utime(newer, (2, 2))
             server, thread = self._start_server(
-                root, max_total_bytes=10, min_free_bytes=0
+                root, max_total_bytes=10, min_free_bytes=0, evict_oldest=True
             )
             try:
                 self._upload(server.bound_port, "new.bin", b"abcdef")
@@ -364,6 +365,7 @@ class TestQuotaPolicy(unittest.TestCase):
                 root=root,
                 max_total_bytes=8,
                 min_free_bytes=0,
+                evict_oldest=True,
                 logger=QUIET,
             )
             self.assertTrue(server.try_acquire_write(str(active)))

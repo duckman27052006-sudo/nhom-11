@@ -9,6 +9,7 @@
   "max_file_size": 268435456,
   "min_free_bytes": 16777216,
   "max_total_bytes": 10737418240,
+  "evict_oldest": false,
   "max_transfer_seconds": 3600,
   "tid_port_range": [50000, 50100],
   "cleanup_temp_age": 86400,

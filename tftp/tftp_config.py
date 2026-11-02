@@ -44,7 +44,9 @@ class ServerConfig:
     tid_port_range: tuple[int, int] | None = None
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES
     max_total_bytes: int | None = DEFAULT_MAX_TOTAL_BYTES
-    evict_oldest: bool = True
+    # Mặc định KHÔNG xoá file của người dùng để nhường chỗ: tự động unlink dữ
+    # liệu là hành vi phá hoại, chỉ nên bật khi người vận hành chủ động chọn.
+    evict_oldest: bool = False
     max_transfer_seconds: float | None = DEFAULT_MAX_TRANSFER_SECONDS
     cleanup_temp_age: float = DEFAULT_CLEANUP_TEMP_AGE
     stats_interval: float = 0.0

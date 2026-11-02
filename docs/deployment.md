@@ -38,6 +38,7 @@ ngẫu nhiên sau RRQ/WRQ, nên chỉ mở port 6969 là chưa đủ.
   "max_file_size": 268435456,
   "min_free_bytes": 16777216,
   "max_total_bytes": 10737418240,
+  "evict_oldest": false,
   "max_transfer_seconds": 3600,
   "tid_port_range": [50000, 50100],
   "cleanup_temp_age": 86400,
@@ -55,6 +56,10 @@ python -m tftp.tftp_server --config server.json --check-config
 
 Lệnh trên in cấu hình hiệu lực và thoát với mã `0` nếu hợp lệ. Khóa lạ, sai kiểu,
 port/blksize/quota ngoài khoảng đều bị từ chối với mã `2`.
+
+> `evict_oldest` mặc định `false`: khi đầy quota server trả `ERROR 3` và **không**
+> xoá file nào. Chỉ bật khi root thực sự là bộ đệm tạm và việc mất file cũ là
+> chấp nhận được; mỗi lần xoá đều được ghi log mức `WARNING`.
 
 ## 3. Quyền hệ thống
 

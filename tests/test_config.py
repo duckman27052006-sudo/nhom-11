@@ -22,7 +22,8 @@ class TestConfig(unittest.TestCase):
         self.assertGreater(config.max_file_size, 0)
         self.assertGreater(config.min_free_bytes, 0)
         self.assertEqual(config.max_total_bytes, 500 * 1024 * 1024)
-        self.assertTrue(config.evict_oldest)
+        # Mặc định không được xoá file của người dùng để nhường chỗ.
+        self.assertFalse(config.evict_oldest)
         self.assertEqual(config.family, "auto")
 
     def test_loads_and_normalizes(self):
@@ -84,11 +85,17 @@ class TestConfigCli(unittest.TestCase):
         from tftp import tftp_server
 
         args = tftp_server.build_arg_parser().parse_args(
-            ["--max-total-bytes", "1024", "--no-evict-oldest"]
+            ["--max-total-bytes", "1024", "--evict-oldest"]
         )
         config = tftp_server._config_from_args(args)
         self.assertEqual(config.max_total_bytes, 1024)
-        self.assertFalse(config.evict_oldest)
+        self.assertTrue(config.evict_oldest)
+
+    def test_cli_eviction_is_off_by_default(self):
+        from tftp import tftp_server
+
+        args = tftp_server.build_arg_parser().parse_args(["--max-total-bytes", "1024"])
+        self.assertFalse(tftp_server._config_from_args(args).evict_oldest)
 
     def test_check_config_cli(self):
         from tftp import tftp_server

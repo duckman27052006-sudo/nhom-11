@@ -1,4 +1,4 @@
-﻿"""Cửa sổ chính của GUI TFTP.
+"""Cửa sổ chính của GUI TFTP.
 
 Bố cục chia theo **4 trang** thay vì dồn tất cả vào một màn hình dài:
 
@@ -124,7 +124,8 @@ def discover_lan_ipv4() -> str | None:
 
 
 def muted(widget: QWidget, key: str = "text_muted") -> QWidget:
-    """Tô màu chữ theo token (thay cho QSS)."""
+    """Tô màu chữ theo token; nhớ token để đổi theme còn cập nhật lại màu."""
+    widget.setProperty("tokenColor", key)
     widget.setStyleSheet(f"color: {theme.current_tokens()[key]};")
     return widget
 
@@ -205,7 +206,7 @@ class TopBar(Surface):
         titles.addWidget(name)
         tag = QLabel(f"RFC 1350 · v{__version__}")
         tag.setFont(theme.font(8))
-        tag.setStyleSheet(f"color: {theme.current_tokens()['text_subtle']};")
+        muted(tag, "text_subtle")
         titles.addWidget(tag)
         layout.addLayout(titles)
         layout.addSpacing(12)
@@ -258,11 +259,11 @@ class StatusBar(Surface):
         layout.setSpacing(12)
         self.message = QLabel("Sẵn sàng — chọn file để bắt đầu")
         self.message.setFont(theme.font(8, mono=True))
-        self.message.setStyleSheet(f"color: {theme.current_tokens()['text_muted']};")
+        muted(self.message, "text_muted")
         layout.addWidget(self.message, 1)
         self.hint = QLabel("Ctrl+L: xóa nhật ký · Ctrl+K: dừng server")
         self.hint.setFont(theme.font(8, mono=True))
-        self.hint.setStyleSheet(f"color: {theme.current_tokens()['text_subtle']};")
+        muted(self.hint, "text_subtle")
         layout.addWidget(self.hint)
 
 
@@ -284,6 +285,7 @@ class MainWindow(QWidget):
         self.theme_name = "light"
         self._intro_fade: QPropertyAnimation | None = None
         self._log_lines: list[tuple[str, str]] = []
+        self._close_pending = False
 
         self.log_bridge = LogBridge(self)
         self.uptime = motion.Ticker(1000, self)
@@ -371,7 +373,7 @@ class MainWindow(QWidget):
 
         self.hero_clock = QLabel("00:00")
         self.hero_clock.setFont(theme.bold(9.5, mono=True))
-        self.hero_clock.setStyleSheet(f"color: {theme.current_tokens()['primary']};")
+        muted(self.hero_clock, "primary")
         hero_text.addWidget(self.hero_clock)
         hero_layout.addLayout(hero_text, 1)
 
@@ -451,7 +453,7 @@ class MainWindow(QWidget):
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(theme.medium(8.5))
-        label.setStyleSheet(f"color: {theme.current_tokens()['text_subtle']};")
+        muted(label, "text_subtle")
         return label
 
     # ================================================= trang 1: Truyền ===
@@ -1073,8 +1075,21 @@ class MainWindow(QWidget):
         self._style_terminal()
         self._refresh_log_view()
         restyle_tree(self)
+        self._restyle_token_labels()
         self._set_backgrounds()
         self._refresh_server_files()
+
+    def _restyle_token_labels(self) -> None:
+        """Cập nhật lại màu QSS của các QLabel gắn token khi đổi theme.
+
+        `muted()` ghi token vào property ``tokenColor``; nếu không vẽ lại thì
+        chữ giữ màu của theme cũ (ví dụ xám nhạt trên nền tối).
+        """
+        tokens = theme.current_tokens()
+        for label in self.findChildren(QLabel):
+            key = label.property("tokenColor")
+            if isinstance(key, str) and key in tokens:
+                label.setStyleSheet(f"color: {tokens[key]};")
 
     def _set_backgrounds(self) -> None:
         """Đặt nền cho các container gốc + ghim palette cho input hệ điều hành."""
@@ -1205,6 +1220,15 @@ class MainWindow(QWidget):
     def _on_server_failed(self, message: str) -> None:
         self.top_bar.set_status("err", "Server lỗi")
         self.status_bar.message.setText(f"Server không chạy được: {message}")
+        # Bind thất bại: phải xoá state, nếu không GUI tưởng server vẫn chạy,
+        # nút "Khởi động" bị ẩn và mọi lần bấm sau đều return ngay.
+        thread, self.server_thread = self.server_thread, None
+        self.server = None
+        if thread is not None:
+            thread.quit()
+            thread.wait(3000)
+        self.uptime.stop()
+        self.hero_clock.setText("00:00")
         self._set_running(False)
 
     @Slot()
@@ -1368,8 +1392,10 @@ class MainWindow(QWidget):
 
     @Slot(QTableWidgetItem)
     def _on_file_activated(self, item: QTableWidgetItem) -> None:
-        name = self.files_table.table.item(item.row(), 0).text()
-        self._quick_pick(name)
+        cell = self.files_table.table.item(item.row(), 0)
+        if cell is None:
+            return
+        self._quick_pick(cell.text())
         self.go_to(PAGE_TRANSFER)
 
     @Slot(str)
@@ -1381,6 +1407,9 @@ class MainWindow(QWidget):
     def _start_transfer(
         self, direction: str, client: TftpClient, source: str, target: str
     ) -> None:
+        if self.transfer_thread is not None:
+            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
+            return
         self.transfer_thread = QThread(self)
         self.transfer_worker = TransferWorker(client, direction, source, target)
         self.transfer_worker.moveToThread(self.transfer_thread)
@@ -1399,8 +1428,10 @@ class MainWindow(QWidget):
         worker.failed.connect(self._transfer_done)
 
         self.transfer_thread.start()
-        self.download_button.setEnabled(not download)
-        self.upload_button.setEnabled(download)
+        # Chỉ một phiên tại một thời điểm: bật cả hai nút sẽ cho phép phiên
+        # ngược chiều ghi đè transfer_thread/worker (và phiên đầu quit nhầm).
+        self.download_button.setEnabled(False)
+        self.upload_button.setEnabled(False)
 
     @Slot(str)
     def _transfer_done(self, _result: str) -> None:
@@ -1411,6 +1442,9 @@ class MainWindow(QWidget):
             thread.wait(2000)
         self.download_button.setEnabled(True)
         self.upload_button.setEnabled(True)
+        if self._close_pending:
+            self._close_pending = False
+            self.close()
 
     def _target_host_port(self) -> tuple[str, int] | None:
         text = self.target_edit.text().strip() or "127.0.0.1:6969"
@@ -1422,6 +1456,9 @@ class MainWindow(QWidget):
 
     @Slot()
     def _start_download(self) -> None:
+        if self.transfer_thread is not None:
+            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
+            return
         name = self.download_name.text().strip()
         if not name:
             self.status_bar.message.setText("Cần nhập tên file cần tải")
@@ -1470,6 +1507,7 @@ class MainWindow(QWidget):
 
     @Slot(str)
     def _on_download_err(self, message: str) -> None:
+        self.download_progress.set_busy(False)
         self.download_progress.set_state("err")
         self.download_header.set_badge("LỖI")
         self.download_banner.set_message(message)
@@ -1479,6 +1517,9 @@ class MainWindow(QWidget):
 
     @Slot()
     def _start_upload(self) -> None:
+        if self.transfer_thread is not None:
+            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
+            return
         source = self.upload_pick.text().strip()
         if not source or not os.path.isfile(source):
             self.upload_pick.set_error("Chọn một file có thật trên đĩa")
@@ -1530,6 +1571,7 @@ class MainWindow(QWidget):
 
     @Slot(str)
     def _on_upload_err(self, message: str) -> None:
+        self.upload_progress.set_busy(False)
         self.upload_progress.set_state("err")
         self.upload_header.set_badge("LỖI")
         self.upload_banner.set_message(message)
@@ -1563,10 +1605,23 @@ class MainWindow(QWidget):
         super().resizeEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - tên do Qt đặt
+        # Đang truyền file thì chưa đóng: QThread còn chạy mà bị destroy sẽ làm
+        # Qt abort cả tiến trình. Đóng nốt khi phiên truyền kết thúc.
+        if self.transfer_thread is not None and self.transfer_thread.isRunning():
+            self._close_pending = True
+            self.status_bar.message.setText(
+                "Đang truyền file — cửa sổ sẽ đóng khi phiên truyền kết thúc"
+            )
+            event.ignore()
+            return
+        self._shutdown()
+        super().closeEvent(event)
+
+    def _shutdown(self) -> None:
         if self.server is not None:
             self._stop_server()
-        if self.transfer_thread is not None:
-            self.transfer_thread.quit()
-            self.transfer_thread.wait(2000)
+        thread = self.transfer_thread
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
         self.log_bridge.detach()
-        super().closeEvent(event)

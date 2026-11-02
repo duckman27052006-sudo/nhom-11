@@ -36,10 +36,16 @@ def private_network(value: str):
     ranges = [ipaddress.ip_network(cidr) for cidr in (
         "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "fc00::/7", "::1/128"
     )]
-    if not any(network.version == allowed.version and network.subnet_of(allowed)
-               for allowed in ranges):
-        raise UploadConfigError("Chỉ chấp nhận subnet private hoặc loopback cụ thể.")
-    return network
+    for allowed in ranges:
+        if (isinstance(network, ipaddress.IPv4Network)
+                and isinstance(allowed, ipaddress.IPv4Network)):
+            if network.subnet_of(allowed):
+                return network
+        elif (isinstance(network, ipaddress.IPv6Network)
+                and isinstance(allowed, ipaddress.IPv6Network)):
+            if network.subnet_of(allowed):
+                return network
+    raise UploadConfigError("Chỉ chấp nhận subnet private hoặc loopback cụ thể.")
 
 
 def validate_bind_host(value: str) -> str:

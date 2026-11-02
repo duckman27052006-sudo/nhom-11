@@ -68,8 +68,9 @@ TftpClient("127.0.0.1", 6969, metrics=shared)
 
 Mỗi `timer` cho ra: `count`, `avg`, `min`, `max`, `p50`, `p95`, `p99`, `total_s`.
 
-Mẫu được giữ tối đa `MAX_SAMPLES` (4096) rồi thưa dần một nửa, nên soak test chạy
-hàng giờ không phình RAM mà p50/p95/p99 vẫn có ý nghĩa.
+Mẫu được giữ tới `2 × MAX_SAMPLES` (8192) rồi thưa dần một nửa về ~`MAX_SAMPLES`
+(4096); mẫu lớn nhất luôn được giữ lại để spike không bị bỏ khỏi p95/p99. Nhờ vậy
+soak test chạy hàng giờ không phình RAM mà phân vị vẫn có ý nghĩa.
 
 Mọi thao tác đều an toàn khi gọi từ nhiều thread (server mở 1 thread/phiên).
 

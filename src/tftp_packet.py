@@ -60,8 +60,8 @@ def clamp_timeout(value: object, default: int = DEFAULT_TIMEOUT) -> int:
     lại liên tục và nuốt ACK của client.
     """
     try:
-        seconds = int(float(value))
-    except (TypeError, ValueError):
+        seconds = int(float(str(value)))
+    except (TypeError, ValueError, OverflowError):
         return default
     return min(MAX_TIMEOUT, max(MIN_TIMEOUT, seconds))
 
@@ -102,6 +102,7 @@ class RRQ(Packet):
     options: dict[str, str] = field(default_factory=dict)
 
     def pack(self) -> bytes:
+        validate_request(self)
         return _pack_request(OP_RRQ, self.filename, self.mode, self.options)
 
 
@@ -115,6 +116,7 @@ class WRQ(Packet):
     options: dict[str, str] = field(default_factory=dict)
 
     def pack(self) -> bytes:
+        validate_request(self)
         return _pack_request(OP_WRQ, self.filename, self.mode, self.options)
 
 
@@ -167,6 +169,8 @@ class ERROR(Packet):
     message: str = ""
 
     def pack(self) -> bytes:
+        if not 0 <= self.code <= 0xFFFF:
+            raise tftp_errors.TftpIllegalOperation(f"mã lỗi vượt quá 16 bit: {self.code}")
         text = (self.message or tftp_errors.error_message(self.code)).encode("utf-8", "replace")
         return struct.pack("!HH", OP_ERROR, self.code) + text + b"\x00"
 
@@ -188,7 +192,16 @@ class OACK(Packet):
         for name, value in self.options.items():
             # latin-1 là bản ánh xạ 1 byte <-> 1 code point nên pack/unpack
             # giữ nguyên byte cho cả option lạ chứa byte > 127.
-            out += name.encode("ascii") + b"\x00" + str(value).encode("latin-1") + b"\x00"
+            try:
+                key = name.encode("ascii")
+                encoded = str(value).encode("latin-1")
+            except UnicodeEncodeError as exc:
+                raise tftp_errors.TftpIllegalOperation(
+                    "option phải dùng ký tự ASCII (tên) và latin-1 (giá trị)"
+                ) from exc
+            if not key or b"\x00" in key or b"\x00" in encoded:
+                raise tftp_errors.TftpIllegalOperation("option chứa byte 0 hoặc tên rỗng")
+            out += key + b"\x00" + encoded + b"\x00"
         return bytes(out)
 
     def as_int(self, name: str, default: int | None = None) -> int | None:
@@ -216,10 +229,19 @@ def _encode_text(value: str, field_name: str) -> bytes:
 def _encode_options(options: dict[str, str] | None) -> bytes:
     out = bytearray()
     for name, value in (options or {}).items():
+        # Giữ cả option lạ để ``unpack`` → ``pack`` không làm mất dữ liệu
+        # (RFC 2347: bên nhận bỏ qua option không hỗ trợ, không được sửa gói).
         key = str(name).lower()
-        if key not in OPTION_NAMES:
-            continue
-        out += key.encode("ascii") + b"\x00" + str(value).encode("latin-1") + b"\x00"
+        try:
+            key_bytes = key.encode("ascii")
+            value_bytes = str(value).encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise tftp_errors.TftpIllegalOperation(
+                "option phải dùng ký tự ASCII (tên) và latin-1 (giá trị)"
+            ) from exc
+        if not key_bytes or b"\x00" in key_bytes or b"\x00" in value_bytes:
+            raise tftp_errors.TftpIllegalOperation("option chứa byte 0 hoặc tên rỗng")
+        out += key_bytes + b"\x00" + value_bytes + b"\x00"
     return bytes(out)
 
 
@@ -228,10 +250,16 @@ def _pack_request(opcode: int, filename: str, mode: str, options: dict[str, str]
         raise tftp_errors.TftpIllegalOperation(f"opcode {opcode} không phải RRQ/WRQ")
     if len(filename.encode("ascii", "replace")) > MAX_FILENAME:
         raise tftp_errors.TftpIllegalOperation("tên file quá dài")
+    if isinstance(mode, str):
+        # RFC 1350 §5: mode không phân biệt hoa/thường.
+        mode = mode.lower()
     head = struct.pack("!H", opcode)
     head += _encode_text(filename, "filename") + b"\x00"
     head += _encode_text(mode, "mode") + b"\x00"
-    return head + _encode_options(options)
+    payload = head + _encode_options(options)
+    if len(payload) > 512:
+        raise tftp_errors.TftpIllegalOperation("gói RRQ/WRQ vượt 512 byte (RFC 2347)")
+    return payload
 
 
 def _split_cstrings(payload: bytes, expected_min: int) -> list[bytes]:
@@ -284,7 +312,14 @@ def _parse_option_int(name: str, value: object) -> int:
     text = str(value)
     if not text or not text.isascii() or not text.isdigit():
         raise tftp_errors.TftpFormatError(f"option {name} không phải số nguyên: {value!r}")
-    return int(text)
+    # Python giới hạn số chữ số khi chuyển str -> int (mặc định 4300); chặn sớm
+    # để một gói tin lớn không làm `unpack` ném ValueError thô.
+    if len(text) > 20:
+        raise tftp_errors.TftpFormatError(f"option {name} quá lớn: {text[:20]}...")
+    try:
+        return int(text)
+    except ValueError as exc:  # pragma: no cover - phòng thủ cho Python tương lai
+        raise tftp_errors.TftpFormatError(f"option {name} không đổi được sang số") from exc
 
 
 def _option_to_int(name: str, options: dict[str, str], default: int | None) -> int | None:
@@ -299,7 +334,7 @@ def validate_request(packet: RRQ | WRQ) -> None:
         raise tftp_errors.TftpIllegalOperation("tên file rỗng")
     if len(packet.filename) > MAX_FILENAME:
         raise tftp_errors.TftpIllegalOperation("tên file quá dài")
-    if packet.mode not in TRANSFER_MODES:
+    if packet.mode.lower() not in TRANSFER_MODES:
         raise tftp_errors.TftpIllegalOperation(f"mode không hợp lệ: {packet.mode!r}")
     parse_options(packet)
 
@@ -342,18 +377,24 @@ def unpack(data: bytes) -> AnyPacket:
     if opcode in (OP_RRQ, OP_WRQ):
         tokens = _split_cstrings(data[2:], 3)
         filename = _decode_text(tokens[0], "filename")
-        mode = _decode_text(tokens[1], "mode")
+        # RFC 1350 §5: mode không phân biệt hoa/thường, chuẩn hoá về chữ thường.
+        mode = _decode_text(tokens[1], "mode").lower()
         options = _parse_options(_strip_trailing_empty(tokens[2:]))
         cls = RRQ if opcode == OP_RRQ else WRQ
-        packet: AnyPacket = cls(filename=filename, mode=mode, options=options)
-        validate_request(packet)
-        return packet
+        request: RRQ | WRQ = cls(filename=filename, mode=mode, options=options)
+        validate_request(request)
+        return request
 
     if opcode == OP_DATA:
         if len(data) < 4:
             raise tftp_errors.TftpFormatError("DATA tối thiểu phải có 4 byte")
         block = struct.unpack("!H", data[2:4])[0]
-        return DATA(block=block, data=data[4:])
+        payload = data[4:]
+        if len(payload) > MAX_BLKSIZE:
+            raise tftp_errors.TftpFormatError(
+                f"DATA {len(payload)} byte vượt quá blksize tối đa {MAX_BLKSIZE}"
+            )
+        return DATA(block=block, data=payload)
 
     if opcode == OP_ACK:
         if len(data) != 4:
@@ -380,11 +421,11 @@ def unpack(data: bytes) -> AnyPacket:
     options = _parse_options(_strip_trailing_empty(tokens))
     if not options:
         raise tftp_errors.TftpFormatError("OACK phải có ít nhất một option")
-    packet = OACK(options=options)
+    oack = OACK(options=options)
     # Option đã biết mà giá trị không phải số thuần => OACK rác, từ chối ngay
     # thay vì đẩy lỗi xuống tầng thương lượng.
-    parse_options(packet)
-    return packet
+    parse_options(oack)
+    return oack
 
 
 def is_valid(data: bytes) -> bool:
@@ -420,30 +461,65 @@ def make_error(code: int, message: str = "") -> bytes:
 
 # ------------------------------------------------------------------- netascii ---
 def bytes_to_netascii(data: bytes) -> bytes:
-    """Chuyển dữ liệu 8-bit sang netascii (LF -> CRLF, CR -> CRLF)."""
-    data = data.replace(b"\r\n", b"\n")
-    return data.replace(b"\r", b"\n").replace(b"\n", b"\r\n")
+    """Chuyển dữ liệu 8-bit sang netascii theo RFC 1350 (mục 4.1).
+
+    - ``LF`` (0x0A) → ``CR LF``
+    - ``CR`` (0x0D) → ``CR NUL`` (NUL là 0x00)
+
+    Đây là ánh xạ 1-1 theo từng byte, nên cắt khối ở đâu cũng không làm hỏng
+    dữ liệu; phía nhận dùng :class:`NetasciiDecoder` để ghép lại.
+    """
+    out = bytearray()
+    for byte in data:
+        if byte == 0x0D:
+            out += b"\r\x00"
+        elif byte == 0x0A:
+            out += b"\r\n"
+        else:
+            out.append(byte)
+    return bytes(out)
 
 
 def netascii_to_bytes(data: bytes) -> bytes:
-    """Chuyển dữ liệu netascii về 8-bit (CRLF -> LF, CR -> LF)."""
-    data = data.replace(b"\r\n", b"\n")
-    return data.replace(b"\r", b"\n")
+    """Chuyển netascii về 8-bit: ``CR LF`` → ``LF``, ``CR NUL`` → ``CR``.
+
+    Một ``CR`` đơn lẻ (không theo sau bởi LF/NUL) là gói tin sai chuẩn; giữ
+    nguyên ``CR`` thay vì tự đoán thành xuống dòng.
+    """
+    out = bytearray()
+    index = 0
+    length = len(data)
+    while index < length:
+        byte = data[index]
+        if byte == 0x0D and index + 1 < length:
+            following = data[index + 1]
+            if following == 0x0A:
+                out.append(0x0A)
+                index += 2
+                continue
+            if following == 0x00:
+                out.append(0x0D)
+                index += 2
+                continue
+        out.append(byte)
+        index += 1
+    return bytes(out)
 
 
 class NetasciiReader:
     """Đọc file và trả từng khối netascii, **luôn đúng `blksize` byte** trừ khối cuối.
 
-    LF -> CRLF làm dữ liệu dài ra, nên phải convert *trước* rồi mới cắt khối:
-    đọc `blksize` byte thô rồi convert có thể sinh khối gấp đôi blksize
-    (vi phạm RFC 2347) và làm sai phát hiện block cuối.
+    LF -> CR LF và CR -> CR NUL làm dữ liệu dài ra, nên phải convert *trước* rồi
+    mới cắt khối: đọc `blksize` byte thô rồi convert có thể sinh khối gấp đôi
+    blksize (vi phạm RFC 2347) và làm sai phát hiện block cuối.
 
     Bất biến quan trọng nhất: **chỉ khối cuối mới được ngắn hơn blksize**, vì
     người nhận coi DATA ngắn là kết thúc truyền (RFC 1350 §4.2). Nếu khối ở
     giữa file bị ngắn, file nhận được sẽ bị cắt cụt.
 
-    Vì buộc phải đầy khối, biên khối đôi khi rơi đúng giữa cặp CRLF. Phía nhận
-    phải ghép lại bằng :class:`NetasciiDecoder` (xem `docs/RFC-1350-notes.md`).
+    Vì buộc phải đầy khối, biên khối đôi khi rơi đúng giữa cặp CR LF hoặc CR NUL.
+    Phía nhận phải ghép lại bằng :class:`NetasciiDecoder` (xem
+    `docs/RFC-1350-notes.md`).
     """
 
     def __init__(self, handle, blksize: int) -> None:
@@ -459,20 +535,6 @@ class NetasciiReader:
             if not raw:
                 self._eof = True
                 break
-            if raw.endswith(b"\r"):
-                # Không để cặp CRLF bị tách ở phía *thô*: nếu không, byte \n đứng
-                # đầu lần đọc sau sẽ thành một kết thúc dòng thừa.
-                try:
-                    nxt = self.handle.read(1)
-                except OSError:
-                    nxt = b""
-                if nxt == b"\n":
-                    raw = raw + nxt
-                elif nxt:
-                    try:
-                        self.handle.seek(-1, 1)
-                    except OSError:
-                        pass
             self._buf += bytes_to_netascii(raw)
 
     def read_chunk(self) -> bytes:
@@ -483,13 +545,14 @@ class NetasciiReader:
 
 
 class NetasciiDecoder:
-    """Giải mã netascii theo luồng, tự nối cặp CRLF bị tách qua 2 DATA block.
+    """Giải mã netascii theo luồng, tự nối cặp CR bị tách qua 2 DATA block.
 
     Mỗi block đều có thể được convert độc lập **trừ** khi block kết thúc bằng
-    ``\\r`` — dấu hiệu nửa đầu của một cặp CRLF nằm sang block kế tiếp. Decoder
-    giữ lại byte đó và ghép vào đầu block sau, nên dữ liệu luôn khớp với gốc.
+    ``\\r`` — dấu hiệu nửa đầu của ``CR LF`` hoặc ``CR NUL`` nằm sang block kế
+    tiếp. Decoder giữ lại byte đó và ghép vào đầu block sau, nên dữ liệu luôn
+    khớp với gốc.
 
-    Với sender không cắt CRLF (đa số cài đặt khác), ``_pending`` luôn rỗng và
+    Với sender không cắt cặp CR (đa số cài đặt khác), ``_pending`` luôn rỗng và
     decoder hành xử y hệt ``netascii_to_bytes``.
     """
 
@@ -498,21 +561,31 @@ class NetasciiDecoder:
 
     def feed(self, data: bytes) -> bytes:
         """Nhận payload của một DATA và trả về phần đã giải mã (có thể rỗng)."""
-        out = b""
+        out = bytearray()
         if self._pending:
-            if data[:1] == b"\n":
-                # Nửa "\n" của cặp CRLF bị tách: cả cặp chỉ là MỘT kết thúc dòng.
-                out = b"\n"
+            first = data[:1]
+            if first == b"\n":
+                # CR LF bị tách: cả cặp là MỘT kết thúc dòng.
+                out.append(0x0A)
+                data = data[1:]
+            elif first == b"\x00":
+                # CR NUL bị tách: trả lại đúng byte CR.
+                out.append(0x0D)
                 data = data[1:]
             else:
-                out = netascii_to_bytes(self._pending)
+                # CR đơn lẻ không hợp lệ — giữ nguyên thay vì đoán.
+                out.append(0x0D)
             self._pending = b""
         if data.endswith(b"\r"):
             self._pending = data[-1:]
             data = data[:-1]
-        return out + netascii_to_bytes(data)
+        out += netascii_to_bytes(data)
+        return bytes(out)
 
     def flush(self) -> bytes:
-        """Trả nốt byte treo dở (chỉ xảy ra nếu luồng kết thúc giữa cặp CRLF)."""
+        """Trả nốt byte treo dở (chỉ xảy ra nếu luồng kết thúc giữa cặp CR)."""
         pending, self._pending = self._pending, b""
-        return netascii_to_bytes(pending)
+        if not pending:
+            return b""
+        # CR treo cuối luồng là dữ liệu lỗi; trả lại nguyên byte để không mất.
+        return b"\r"

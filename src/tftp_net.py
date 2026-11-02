@@ -136,9 +136,11 @@ def resolve_addresses(
     scope_id = _zone_to_scope_id(zone)
     resolved: list[ResolvedAddress] = []
     seen: set[tuple] = set()
-    for info_family, _socktype, _proto, _canon, sockaddr in infos:
+    sockaddr: tuple
+    for info_family, _socktype, _proto, _canon, raw_sockaddr in infos:
         if info_family not in wanted:
             continue
+        sockaddr = tuple(raw_sockaddr)
         if info_family == socket.AF_INET6:
             if scope_id:
                 sockaddr = (sockaddr[0], sockaddr[1], sockaddr[2], scope_id)

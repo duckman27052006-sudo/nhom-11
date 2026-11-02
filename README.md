@@ -318,7 +318,7 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 6 | ghi đè bị chặn | ERROR code 6 mặc định; `--overwrite` mới cho phép |
 | 7 | mất ACK | client gửi lại đúng ACK cũ, truyền vẫn hoàn tất |
 | 8 | nhiều client song song | 8 client cùng lúc, không lẫn dữ liệu |
-| 9 | netascii | CRLF ↔ LF đúng quy cách |
+| 9 | netascii | LF ↔ CR LF, CR ↔ CR NUL; giữ đúng CR đơn lẻ qua biên block |
 | 10 | path traversal | `../secret.txt` bị từ chối (ERROR 2) |
 | 11 | RRQ lặp lại | server trả lời lại từ **cùng TID** |
 | 12 | gói tin hỏng | opcode lạ / datagram rỗng → ERROR 4, không tạo phiên |
@@ -402,7 +402,7 @@ Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 �
   ghi file tạm rồi `os.replace` để không để lại file dở dang.
 - Lock theo tên file khi WRQ: 2 upload cùng tên thì 1 bên nhận ERROR 6.
 - Chế độ `octet` và `netascii` (netascii luôn chia chunk **đúng blksize** trừ block cuối,
-  và decoder tự nối cặp CRLF bị tách qua 2 block — không bao giờ cắt cụt file).
+  và decoder tự nối cặp CR LF / CR NUL bị tách qua 2 block — không bao giờ cắt cụt file).
 - File rỗng, file đúng bằng bội số blksize, file nhiều MB.
 - Siết parser: option lặp, giá trị option không phải số thuần, OACK rác,
   ERROR thiếu byte 0, DATA vượt blksize — đều bị từ chối bằng ERROR chuẩn.

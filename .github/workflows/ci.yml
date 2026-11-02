@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Chạy khi merge vào main và cho mọi PR; không chạy lặp trên nhánh feature
+  # (push + pull_request sẽ tạo 2 run trùng cho cùng một commit).
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -28,6 +31,10 @@ jobs:
         run: |
           python -m pip install --upgrade ruff
           ruff check .
+      - name: Type check (core)
+        run: |
+          python -m pip install mypy
+          python -m mypy src/tftp_packet.py src/tftp_errors.py src/tftp_metrics.py src/tftp_net.py src/tftp_server.py src/tftp_client.py src/web_upload/__init__.py --ignore-missing-imports
 
   # Soak/stress test nặng: chạy riêng để CI chính vẫn nhanh.
   soak:

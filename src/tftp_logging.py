@@ -43,7 +43,7 @@ def setup_logging(
             old.close()
         except OSError:
             pass
-    for handler in handlers:
-        root.addHandler(handler)
+    for active_handler in handlers:
+        root.addHandler(active_handler)
     root.setLevel(level)
     return handlers

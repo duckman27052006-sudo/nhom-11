@@ -800,6 +800,7 @@ class Field(QWidget):
         caption = QLabel(label)
         caption.setFont(theme.label_font(8.5))
         caption.setStyleSheet(f"color: {theme.current_tokens()['text_muted']};")
+        self._caption = caption
         layout.addWidget(caption)
         layout.addWidget(control)
         self.control = control
@@ -811,6 +812,11 @@ class Field(QWidget):
         self.hint.setVisible(bool(hint))
         layout.addWidget(self.hint)
         layout.addStretch(1)
+
+    def restyle(self) -> None:
+        tokens = theme.current_tokens()
+        self._caption.setStyleSheet(f"color: {tokens['text_muted']};")
+        self.hint.setStyleSheet(f"color: {tokens['text_subtle']};")
 
 
 class NumberInput(QWidget):
@@ -1236,6 +1242,7 @@ class Toast(Surface):
         self.label.setWordWrap(True)
         layout.addWidget(self.label, 1)
         self.setMaximumWidth(420)
+        self._state = "ok"
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(3200)
@@ -1243,13 +1250,14 @@ class Toast(Surface):
         self.hide()
 
     def show_message(self, text: str, state: str = "ok") -> None:
+        self._state = state
+        tokens = theme.current_tokens()
         color = {
             "ok": "success",
             "warn": "warning",
             "err": "danger",
             "info": "primary",
         }.get(state, "primary")
-        tokens = theme.current_tokens()
         self.dot.setStyleSheet(f"color: {tokens[color]};")
         self.label.setStyleSheet(f"color: {tokens['text']};")
         self.label.setText(text)
@@ -1257,6 +1265,20 @@ class Toast(Surface):
         self.raise_()
         self.reposition()
         self._timer.start()
+
+    def restyle(self) -> None:
+        super().restyle()
+        if not self.label.text():
+            return
+        tokens = theme.current_tokens()
+        color = {
+            "ok": "success",
+            "warn": "warning",
+            "err": "danger",
+            "info": "primary",
+        }.get(self._state, "primary")
+        self.dot.setStyleSheet(f"color: {tokens[color]};")
+        self.label.setStyleSheet(f"color: {tokens['text']};")
 
     def reposition(self) -> None:
         parent = self.parentWidget()
@@ -1294,9 +1316,13 @@ def restyle_tree(root: QWidget) -> None:
         EmptyState,
         ErrorBanner,
         DataTable,
+        Field,
+        Toast,
     ):
         for widget in root.findChildren(kind):
-            widget.restyle()
+            restyle = getattr(widget, "restyle", None)
+            if restyle is not None:
+                restyle()
     root.update()
 
 

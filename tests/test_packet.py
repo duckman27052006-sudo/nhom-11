@@ -39,9 +39,10 @@ class TestRequestPackets(unittest.TestCase):
         raw = RRQ("big.bin", "octet", {"blksize": "1468", "timeout": "3"}).pack()
         self.assertEqual(raw, b"\x00\x01big.bin\x00octet\x00blksize\x001468\x00timeout\x003\x00")
 
-    def test_unknown_option_is_not_serialized(self):
+    def test_unknown_option_is_preserved(self):
+        # RFC 2347: bên nhận bỏ qua option lạ, nhưng không được sửa gói khi pack lại.
         raw = RRQ("x", "octet", {"windowsize": "4"}).pack()
-        self.assertEqual(raw, b"\x00\x01x\x00octet\x00")
+        self.assertEqual(raw, b"\x00\x01x\x00octet\x00windowsize\x004\x00")
 
     def test_round_trip(self):
         packet = unpack(RRQ("hello world.bin", "octet", {"blksize": "1024"}).pack())
@@ -189,21 +190,27 @@ class TestValidation(unittest.TestCase):
 
 
 class TestNetascii(unittest.TestCase):
+    """Ánh xạ netascii theo RFC 1350 §4.1: LF -> CR LF, CR -> CR NUL."""
+
     def test_lf_becomes_crlf(self):
         self.assertEqual(bytes_to_netascii(b"a\nb\n"), b"a\r\nb\r\n")
 
-    def test_existing_crlf_is_not_doubled(self):
-        self.assertEqual(bytes_to_netascii(b"a\r\nb"), b"a\r\nb")
+    def test_crlf_round_trips_through_cr_nul_and_cr_lf(self):
+        wire = bytes_to_netascii(b"a\r\nb")
+        self.assertEqual(wire, b"a\r\x00\r\nb")
+        self.assertEqual(netascii_to_bytes(wire), b"a\r\nb")
 
-    def test_lone_cr_becomes_crlf(self):
-        self.assertEqual(bytes_to_netascii(b"a\rb"), b"a\r\nb")
+    def test_lone_cr_becomes_cr_nul(self):
+        self.assertEqual(bytes_to_netascii(b"a\rb"), b"a\r\x00b")
 
     def test_reverse(self):
-        self.assertEqual(netascii_to_bytes(b"a\r\nb\rc"), b"a\nb\nc")
+        self.assertEqual(netascii_to_bytes(b"a\r\nb\r\x00c"), b"a\nb\rc")
+        # CR đơn lẻ không hợp lệ: giữ nguyên thay vì tự đoán thành xuống dòng.
+        self.assertEqual(netascii_to_bytes(b"a\rb"), b"a\rb")
 
     def test_round_trip_text(self):
         text = b"line one\nline two\r\nend\r"
-        self.assertEqual(netascii_to_bytes(bytes_to_netascii(text)), b"line one\nline two\nend\n")
+        self.assertEqual(netascii_to_bytes(bytes_to_netascii(text)), text)
 
 
 class TestNetasciiStream(unittest.TestCase):
@@ -275,7 +282,8 @@ class TestNetasciiStream(unittest.TestCase):
     def test_decoder_flushes_trailing_cr(self):
         decoder = tftp_packet.NetasciiDecoder()
         self.assertEqual(decoder.feed(b"abc\r"), b"abc")
-        self.assertEqual(decoder.flush(), b"\n")
+        # CR treo cuối luồng là dữ liệu lỗi; trả lại nguyên byte để không mất.
+        self.assertEqual(decoder.flush(), b"\r")
 
 
 class TestDescribe(unittest.TestCase):

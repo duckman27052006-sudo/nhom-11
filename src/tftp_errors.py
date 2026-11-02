@@ -14,6 +14,7 @@ ERR_ILLEGAL_OPERATION = 4
 ERR_UNKNOWN_TID = 5
 ERR_FILE_EXISTS = 6
 ERR_NO_SUCH_USER = 7
+ERR_OPTION_NEGOTIATION = 8
 
 ERROR_MESSAGES = {
     ERR_NOT_DEFINED: "Not defined",
@@ -24,6 +25,7 @@ ERROR_MESSAGES = {
     ERR_UNKNOWN_TID: "Unknown transfer ID",
     ERR_FILE_EXISTS: "File already exists",
     ERR_NO_SUCH_USER: "No such user",
+    ERR_OPTION_NEGOTIATION: "Option negotiation failed",
 }
 
 

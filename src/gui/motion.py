@@ -66,6 +66,9 @@ class PageStack(QStackedWidget):
             leaving.setVisible(False)
             leaving.move(0, 0)
         self._leaving = None
+        if arriving is None:
+            self.setUpdatesEnabled(True)
+            return
         arriving.move(0, DRIFT_DY)
         self.setUpdatesEnabled(True)
 

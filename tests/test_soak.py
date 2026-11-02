@@ -172,6 +172,9 @@ class TestLargeFile(unittest.TestCase):
 
             self.assertEqual(Path(target).stat().st_size, size)
             self.assertEqual(Path(target).read_bytes(), payload)
+            # Client trả về trước khi thread phiên server kịp chạy finally;
+            # chờ phiên đóng hẳn rồi mới đọc metrics để không flaky trên CI chậm.
+            self.assertTrue(srv.server.wait_for_idle(timeout=10.0))
             server_metrics = srv.server.metrics
             self.assertGreaterEqual(server_metrics.counter("payload.sent"), size)
             self.assertEqual(server_metrics.counter("sessions.started.RRQ"), 1)
@@ -276,6 +279,8 @@ class TestConcurrentLoad(unittest.TestCase):
             for name in names:
                 self.assertEqual(results.get(name), payloads[name], f"{name} bị lẫn dữ liệu")
 
+            # Các client đã trả về nhưng thread phiên server có thể còn đóng.
+            self.assertTrue(srv.server.wait_for_idle(timeout=30.0))
             metrics = srv.server.metrics.snapshot()
             self.assertEqual(metrics["counters"].get("sessions.finished.ok"), CLIENTS)
             self.assertEqual(metrics["counters"].get("packets.malformed", 0), 0)
@@ -387,6 +392,8 @@ class TestPacketLoss(unittest.TestCase):
                 self.assertEqual(Path(target).read_bytes(), payload)
                 self.assertGreater(proxy.dropped, 0, "proxy phải thực sự bỏ gói")
                 self.assertGreater(client.metrics.counter("packets.retransmitted"), 0)
+                # Client nhận ACK cuối trước khi server kịp cộng metrics phiên.
+                self.assertTrue(srv.server.wait_for_idle(timeout=10.0))
                 server_metrics = srv.server.metrics
                 self.assertGreater(server_metrics.counter("packets.retransmitted"), 0)
                 self.assertEqual(server_metrics.counter("sessions.finished.ok"), 1)

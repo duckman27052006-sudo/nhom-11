@@ -1,13 +1,14 @@
-﻿# Review codebase TFTP — trạng thái hiện tại sau pass tối ưu hóa
+# Review codebase TFTP — trạng thái hiện tại sau pass tối ưu hóa
 
 > Ngày review: 2026-10-11 (đợt 1) · cập nhật sau pass hardening: 2026-10-11
+> · cập nhật 2026-11-01: thêm cổng web upload, IPv6, netascii CR NUL và 19 test hồi quy
 > Phạm vi: `src/`, `tests/`, `docs/`, `README.md`, `pyproject.toml`, `.github/`
 > Kết luận nhanh: sau pass thứ hai, project đã ở mức **production-hardened cho môi
 > trường thực tâm** — có fuzz có seed, soak/stress test, metrics vận hành và CI
 > chạy riêng bộ soak. Vẫn còn một khoảng trống thuần lý thuyết: chưa có kiểm thử
 > chéo với TFTP client/server của bên thứ ba.
-> Trạng thái kiểm tra: `python -m unittest discover` → **130 test PASS**,
-> `ruff check .` → **sạch**.
+> Trạng thái kiểm tra: `python -m unittest discover` → **166 test PASS**,
+> `ruff check .` → **sạch**, `mypy src` → **sạch**.
 
 ---
 
@@ -113,6 +114,8 @@ Hiện tại project có:
    testing ở mức sản phẩm.
 3. Chưa có tracing phân tán (chỉ có metrics), và chưa xuất metrics theo chuẩn
    Prometheus/OpenTelemetry — hiện là JSON + log, đủ dùng nhưng chưa plug-and-play.
+4. Cổng web upload đã có (`src/web_upload.py`) nhưng mới kiểm bằng test nội bộ;
+   chưa có kiểm thử xuyên trình duyệt (Playwright) hay quét bảo mật HTTP.
 
 ---
 

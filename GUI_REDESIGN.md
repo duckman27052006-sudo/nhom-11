@@ -6,7 +6,7 @@
 
 Cơ sở đánh giá: skill `redesign-existing-projects` (audit typography, màu,
 layout, trạng thái, component, icon), đã đối chiếu toàn bộ `src/gui/`
-(`theme.py`, `components.py`, `main_window.py` ~1216 dòng, `motion.py`,
+(`theme.py`, `components.py`, `main_window.py` ~1.370 dòng, `motion.py`,
 `logging_bridge.py`, `tftp_gui.py`) + 2 ảnh chụp màn hình do người dùng cung cấp.
 
 ---
@@ -141,7 +141,7 @@ LIGHT = {
 | `SectionLabel` | Bỏ caps lock: 8.5pt Medium, `text_subtle`, sentence case ("Lối tắt nhanh"). |
 | `ThemedButton` | Giữ 4 variant; thêm `tertiary` (chữ tím, không viền) cho hành động phụ; nút primary cao 40, chữ 9.5 SemiBold; focus ring giữ. |
 | `IconGlyph` (mới) | QWidget vẽ vector 1 nét (down/up/gear/log/chevron/refresh/folder/file/dot/x), size 14–18, màu `current`. Thay mọi glyph text. |
-| `ActionTile` | Bỏ mũi tên `›` text → `IconGlyph(chevron)`; mark vuông radius 8 nền `primary_soft`, icon tím (thay ô tím đặc + chữ trắng — bớt "AI"). Bỏ hover-lift nền, chỉ đổi viền. |
+| `ActionTile` | Bỏ mũi tên `›` text → `IconGlyph(chevron)`; mark vuông radius 8 nền `primary_soft`, icon tím (thay ô tím đặc + chữ trắng — bớt "AI"). Hover chỉ đổi viền/nền nhẹ, không nâng bóng. |
 | `StatTile` | Nhãn sentence case 8pt Medium (bỏ caps); số 20pt Bold **mono**; thêm delta/hint dòng 2. Không equal-height ép buộc — cho `sizePolicy` tự nhiên. |
 | `Field` | Thêm `error: str` → viền input đỏ + chữ đỏ (thay `setProperty("state")` rời rạc của `FilePicker`). Caption + control + hint/error thẳng hàng. |
 | `NumberInput` (mới) | Bọc `QSpinBox`: **ẩn nút ↑↓** (`NoButtons`), chữ mono căn phải, hậu tố đơn vị ("byte", "/s"). Fix triệt để spinbox thô trong ảnh. |
@@ -149,7 +149,7 @@ LIGHT = {
 | `DataTable` (mới, bọc QTableWidget) | Header 8.5pt Medium `text_muted`, không in đậm; hàng cao 34; zebra nhẹ `surface_alt`; cột số căn phải mono; empty state vẽ sẵn (icon + 2 dòng chữ + nút hành động). |
 | `EmptyState` / `ErrorBanner` (mới) | Khung dashed `border_strong` + icon + tiêu đề + mô tả + nút chính. Dùng cho: root trống, list server rỗng, lỗi kết nối (thay QLabel xám). |
 | `StatusPill` | Giữ pulse; chữ 8.5 Medium; rộng co theo text (đã có `setMinimumWidth` động — giữ). |
-| `ShimmerProgressBar` | Cao 8 → **6**; track `surface_sunken`; bỏ dải sáng trắng khi đã có % (chỉ shimmer khi busy không xác định). |
+| `ShimmerProgressBar` | Cao 8; track `surface_sunken`; chỉ shimmer khi busy không xác định (khi đã có % thì vẽ đúng tiến trình). |
 | `DropZone` | Giữ dashed; thêm icon upload + chữ 2 dòng ("Kéo file vào đây" / "hoặc bấm để chọn") — bấm mở dialog (hiện tại chỉ kéo được). |
 | `Toast` (mới) | Hàng thông báo trượt từ dưới status bar cho thành công/thất bại (thay việc chỉ đổi text status dễ bỏ lỡ). |
 
@@ -259,8 +259,8 @@ lệch nhau):
 | P3 | Motion v2 (§6) + copywriting (§7) | `motion.py`, `main_window.py` | Resize giữa slide không kẹt |
 | P4 | README/docs cập nhật ảnh mới | `README.md`, `docs/` | — |
 
-Sau mỗi phase: `ruff check src` + `python -m unittest discover` (giữ 72 test xanh)
-+ smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
+Sau mỗi phase: `ruff check src` + `python -m unittest discover` (giữ toàn bộ 166
+test xanh) + smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
 
 **Ràng buộc bất biến**: QPainter+QPalette (không QSS toàn cục); Fusion style;
 worker/thread/signal API giữ nguyên; hỗ trợ light+dark; cửa sổ tối thiểu

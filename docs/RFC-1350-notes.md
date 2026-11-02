@@ -120,12 +120,16 @@ point) nên `unpack` → `pack` → `unpack` giữ nguyên byte kể cả với 
 | Hướng | Trình tự bắt buộc |
 |---|---|
 | RRQ (server gửi) | `OACK` → nhận `ACK 0` → `DATA 1` → `ACK 1` → ... |
-| WRQ (client gửi) | `OACK` → **client gửi `ACK 0`** → `DATA 1` → `ACK 1` → ... |
+| WRQ (client gửi) | `OACK` → **client gửi ngay `DATA 1`** → `ACK 1` → ... |
 
-Ở hướng WRQ, server **không được gửi thêm gói nào** trước `DATA 1`: client gửi
-`ACK 0` rồi ngay lập tức gửi `DATA 1` mà không chờ phản hồi. Vì vậy trong
-`TftpClient.upload` lệnh `_send(sock, ACK(0))` là gửi một chiều, còn phía server
-dùng `_exchange(..., send=False)` để chờ DATA 1.
+Ở hướng RRQ, client **phải** gửi `ACK 0` để xác nhận OACK (RFC 2347 §4).
+
+Ở hướng WRQ thì **không**: OACK đã thay cho `ACK 0` của RFC 1350, nên client gửi
+thẳng `DATA 1`. Bản cũ gửi thêm `ACK 0` — gói thừa, server của project chấp nhận
+cả hai nên test nội bộ không phát hiện, nhưng server bên thứ ba có thể coi đó là
+gói lạ. Vì DATA 1 có thể tới ngay trong lần chờ phản hồi OACK, server phải giữ
+lại và xử lý nó (`Session._serve_write`, biến `first_data`) chứ không được bỏ —
+nếu bỏ, client phải chờ hết một `timeout` rồi gửi lại.
 
 ## 7. Mã lỗi (RFC 1350 §3)
 
@@ -165,7 +169,7 @@ Các mẫu cần thấy:
 |---|---|
 | RRQ + option | RRQ → OACK → ACK 0 → DATA 1 → ACK 1 → DATA 2 (< blksize) |
 | RRQ thuần | RRQ → DATA 1 → ACK 1 → ... |
-| WRQ + option | WRQ → OACK → ACK 0 → DATA 1 → ACK 1 → ... |
+| WRQ + option | WRQ → OACK → DATA 1 → ACK 1 → ... |
 | RRQ thất bại | RRQ → ERROR 1 |
 | Mất gói | `DATA 1` lặp lại, chỉ có một `ACK 1` được gửi lại |
 

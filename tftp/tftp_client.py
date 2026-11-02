@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import DEFAULT_PORT, enable_utf8_console, tftp_errors
+from . import DEFAULT_PORT, enable_utf8_console, tftp_errors, tftp_fs
 from .tftp_metrics import Metrics
 from .tftp_net import (
     FamilyMode,
@@ -444,14 +444,10 @@ class TftpClient:
             if self.overwrite:
                 os.replace(temp_path, local)
             else:
-                # Tạo đích bằng hard link: atomic, thất bại nếu file đã xuất hiện
-                # trong lúc transfer (không âm thầm ghi đè).
-                try:
-                    os.link(temp_path, local)
-                except FileExistsError:
-                    raise FileExistsError(f"file đích đã tồn tại: {local}") from None
-                else:
-                    os.remove(temp_path)
+                # Tạo đích mà không ghi đè: hard link khi filesystem hỗ trợ,
+                # fallback O_EXCL + copy khi không (exFAT/FAT32 trên USB).
+                if not tftp_fs.commit_without_overwrite(temp_path, local):
+                    raise FileExistsError(f"file đích đã tồn tại: {local}")
             temp_path = ""
             self.metrics.incr("payload.received", total)
             self._summary("tải về", remote, total, block, started)
@@ -527,7 +523,10 @@ class TftpClient:
             self._info(
                 f"server chấp nhận option: blksize={wire_blksize}, timeout={cur_timeout}s"
             )
-            self._send(sock, ACK(0))
+            # RFC 2347: sau OACK của WRQ, client gửi thẳng DATA block 1. OACK đã
+            # thay cho ACK 0 của RFC 1350 nên gửi thêm ACK(0) là gói thừa, có
+            # thể làm server bên thứ ba bối rối (server của project chấp nhận cả
+            # hai nên test nội bộ không phát hiện ra).
         else:
             wire_blksize = DEFAULT_BLKSIZE
 

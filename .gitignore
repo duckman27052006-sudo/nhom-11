@@ -35,7 +35,6 @@ files/*
 !files/empty.dat
 !files/hello.txt
 !files/sample.bin
-!files/test1
 
 # File sua doi / ban tin cuc bo
 *.orig

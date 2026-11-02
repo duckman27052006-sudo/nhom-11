@@ -25,16 +25,20 @@ jobs:
       - name: Compile check
         run: >-
           python -m py_compile tftp/tftp_packet.py tftp/tftp_errors.py
-          tftp/tftp_metrics.py tftp/tftp_server.py tftp/tftp_client.py
+          tftp/tftp_fs.py tftp/tftp_metrics.py tftp/tftp_server.py tftp/tftp_client.py
           tftp/web_store.py tftp/web_upload/__init__.py
       - name: Lint
         run: |
           python -m pip install --upgrade ruff
           ruff check .
-      - name: Type check (core)
+      # Type check cho TOÀN BỘ package (kể cả GUI), không chỉ lõi: trước đây
+      # lỗi type trong gui/main_window.py không bao giờ được CI bắt. PySide6
+      # không cài ở job này; ignore_missing_imports coi nó là Any, vẫn đủ để
+      # bắt lỗi logic của chính project.
+      - name: Type check
         run: |
           python -m pip install mypy
-          python -m mypy tftp/tftp_packet.py tftp/tftp_errors.py tftp/tftp_metrics.py tftp/tftp_net.py tftp/tftp_server.py tftp/tftp_client.py tftp/web_upload/__init__.py --ignore-missing-imports
+          python -m mypy tftp
 
   # Soak/stress test nặng: chạy riêng để CI chính vẫn nhanh.
   soak:

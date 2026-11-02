@@ -45,12 +45,13 @@ echo  IP LAN:       %LAN_HOST%
 echo  Web upload:   http://%LAN_HOST%:8080
 echo  Trang GitHub: https://duckman27052006-sudo.github.io/nhom-11/
 echo.
-echo  Hay bam "Khoi dong server" trong GUI TFTP.
+echo  TFTP server se tu khoi dong tai 127.0.0.1:6969 trong GUI.
+echo  Doi trang thai "Server dang chay" truoc khi gui file tren web.
 echo  Giu ca hai cua so dich vu dang chay de nhan file.
 echo.
 
 rem --- Khoi dong GUI TFTP va web gateway trong hai cua so rieng ---
-start "TFTP Console" "%PY%" -m tftp.tftp_gui
+start "TFTP Console" "%PY%" -m tftp.tftp_gui --start-server
 if errorlevel 1 goto launch_error
 start "TFTP Web Upload" "%PY%" -m tftp.web_upload --host "%LAN_HOST%" --port 8080 --allowed-network "%LAN_CIDR%" --tftp-server 127.0.0.1:6969
 if errorlevel 1 goto launch_error

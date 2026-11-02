@@ -6,6 +6,11 @@ tự đăng nhập. Máy chủ giữ tài khoản và tin nhắn qua các lần 
 
 ## Cài đặt và chạy
 
+Trên Windows, mở `tftp.bat`: launcher tự khởi động TFTP qua `127.0.0.1:6969`
+trong GUI rồi mở gateway web. Đợi GUI báo **Server đang chạy** trước khi gửi file.
+Nếu mở GUI thủ công bằng `python -m tftp.tftp_gui` thì vẫn cần bấm
+**Khởi động server**; thêm `--start-server` để tự bật TFTP loopback.
+
 Yêu cầu Python 3.10+. Tại thư mục repository:
 
 ```powershell
@@ -109,6 +114,22 @@ Pages không chạy Python/SQLite và không thể thay gateway. Workflow Pages 
 triển khai `site/`; không đưa data-dir hoặc file người dùng vào thư mục này.
 
 ## Chạy lâu dài và kiểm thử
+
+### Khi web báo không kết nối được TFTP
+
+Trang web có thể đăng nhập/chat và liệt kê file ngay cả khi TFTP chưa chạy:
+các chức năng này dùng SQLite/thư mục trên máy, còn upload/download cần TFTP thực sự.
+
+- Mở TFTP Console, bấm **Khởi động server** và kiểm tra trạng thái đang chạy.
+- Gateway mặc định kết nối `127.0.0.1:6969`. Server cần nhận được ở địa chỉ này;
+  nếu bind riêng một IP LAN hoặc đổi cổng, sửa `--tftp-server IP:port` tương ứng.
+- Dùng cùng thư mục `--root` cho gateway và server, giữ cả hai tiến trình đang chạy.
+- Khi gateway/TFTP khác máy, kiểm tra firewall UDP ở máy TFTP và quyền ghi thư mục.
+
+Windows có thể báo `WinError 10054` khi không có dịch vụ ở cổng UDP đích. Web
+hiển thị HTTP 504 kèm địa chỉ/cổng và hướng dẫn khởi động, thay cho lỗi gửi file chung.
+
+### Dịch vụ và kiểm thử
 
 CLI dùng Waitress, không dùng Flask development server. Có thể cấu hình dịch vụ
 Windows với working directory là repository, tài khoản không đặc quyền, log và

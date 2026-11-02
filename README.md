@@ -44,6 +44,9 @@ python -m pip install -e ".[gui]"     # hoặc: python -m pip install PySide6
 python -m tftp.tftp_gui
 ```
 
+Trên Windows, `tftp.bat` tự khởi động TFTP loopback cho web. Nếu mở GUI thủ công,
+bấm **Khởi động server** trước khi upload hoặc dùng `python -m tftp.tftp_gui --start-server`.
+
 Bố cục chia **4 trang** để không dồn hết chức năng vào một màn hình:
 
 | Trang | Nội dung |

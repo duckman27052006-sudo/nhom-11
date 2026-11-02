@@ -2,13 +2,17 @@
 
 > Ngày review: 2026-10-11 (đợt 1) · cập nhật sau pass hardening: 2026-10-11
 > · cập nhật 2026-11-01: thêm cổng web upload, IPv6, netascii CR NUL và 19 test hồi quy
-> Phạm vi: `src/`, `tests/`, `docs/`, `README.md`, `pyproject.toml`, `.github/`
-> Kết luận nhanh: sau pass thứ hai, project đã ở mức **production-hardened cho môi
-> trường thực tâm** — có fuzz có seed, soak/stress test, metrics vận hành và CI
-> chạy riêng bộ soak. Vẫn còn một khoảng trống thuần lý thuyết: chưa có kiểm thử
-> chéo với TFTP client/server của bên thứ ba.
-> Trạng thái kiểm tra: `python -m unittest discover` → **166 test PASS**,
-> `ruff check .` → **sạch**, `mypy tftp` → **sạch**.
+> · cập nhật 2026-11-02: pass review độc lập lần 3 — vá 2 lỗi P0, 4 lỗi P1 và
+>   toàn bộ mục P2 (xem §6); đổi tên package `src` → `tftp`
+> Phạm vi: `tftp/`, `tests/`, `docs/`, `README.md`, `pyproject.toml`, `.github/`
+> Kết luận nhanh: project ở mức **production-hardened cho môi trường LAN tin cậy**
+> — có fuzz có seed, soak/stress test, metrics vận hành và CI chạy riêng bộ soak.
+> Khoảng trống lớn nhất còn lại vẫn là **chưa kiểm thử chéo với TFTP client/server
+> của bên thứ ba** (atftp/tftp-hpa), và TFTP không có authentication (bản chất
+> giao thức, không phải lỗi cài đặt).
+> Trạng thái kiểm tra (2026-11-02, Python 3.13 trên Windows):
+> `python -m unittest discover` → **232 test PASS**;
+> `ruff check .` → **sạch**; `mypy tftp` → **sạch** (đã gồm cả GUI).
 
 ---
 
@@ -171,4 +175,56 @@ Nếu muốn đi tiếp một bước nữa, thứ tự đáng làm là:
 2. xuất metrics theo chuẩn Prometheus nếu sẽ đưa vào hệ thống có sẵn
 3. thêm chế độ `--tls`/xác thực nếu TFTP chạy trên mạng không tin cậy (hiện tại
    bảo mật ở mức *access control*, chưa có *authentication*)
+
+---
+
+## 6. Pass review độc lập 2026-11-02 (đã vá)
+
+Đợt này review lại toàn bộ codebase, **kiểm chứng từng nghi vấn bằng script
+probe chạy thật** trước khi kết luận, rồi vá hết. Mỗi mục đều có test hồi quy.
+
+### P0 — rủi ro dữ liệu / vận hành
+
+| # | Vấn đề | Vá |
+|---|---|---|
+| 1 | `evict_oldest=True` mặc định: chạm quota 500 MiB là **tự xoá file cũ nhất** của người dùng, không hỏi; README lại ghi quota mặc định "không giới hạn" | Mặc định `false`; chỉ xoá khi có `--evict-oldest` / tick ô trong GUI; xoá ghi log `WARNING`; README + `docs/deployment.md` mô tả đúng |
+| 2 | `SO_REUSEADDR` trên UDP (Windows) cho phép **hai server bind trùng một cổng** và chia gói tin trong im lặng (đã probe: 2 process cùng bind được) | Bỏ `SO_REUSEADDR`; trên Windows đặt `SO_EXCLUSIVEADDRUSE`. Bind trùng giờ ném `OSError` |
+
+### P1 — lỗi thật
+
+| # | Vấn đề | Vá |
+|---|---|---|
+| 3 | `--max-transfer-seconds` **chỉ áp cho WRQ**; RRQ chạy vô hạn (probe: RRQ thành công với hạn 1 ms) | Thêm `deadline` vào `Session._serve_read` |
+| 4 | Timer `exchange.rtt` ghi **uptime process** thay vì RTT ở pha chờ sau OACK (`sent_at = 0.0`) — probe cho p99 = 327.715 ms | `sent_at` luôn là mốc thật |
+| 5 | Commit bằng `os.link` **hỏng trên FAT32/exFAT** (USB, thẻ nhớ); server còn báo sai thành `ERROR 3 disk full` | Module `tftp/tftp_fs.py`: hard link → fallback `O_EXCL` + copy; mã lỗi theo `errno` |
+| 6 | GUI liệt kê file **không thể tải** (tên có dấu, file ẩn, `CON`) | Tách `is_servable_name()` dùng chung cho `resolve_path` và GUI; GUI báo "bỏ qua N tên" |
+
+### P2 — chất lượng
+
+| # | Vấn đề | Vá |
+|---|---|---|
+| 7 | Client gửi **ACK(0) thừa sau OACK** của WRQ (RFC 2347: gửi thẳng DATA 1) | Bỏ ACK(0); server xử lý DATA 1 đến ngay trong lần chờ OACK (nếu không sẽ nuốt mất block đầu) |
+| 8 | Thiếu **dally sau ACK cuối** (RFC 1350 §5) | `Session._dally_final_ack` trong WRQ, cửa sổ `min(timeout, final_ack_dally)`, tắt được bằng `final_ack_dally=0` |
+| 9 | `mypy tftp` **có 2 lỗi** (một là bug thật `server_thread is None`); CI chỉ mypy 8 file lõi | Sửa cả 2; CI mypy toàn package, gồm GUI |
+| 10 | GUI dùng API **chỉ có trên Windows** (`os.startfile`, đường dẫn Wireshark) | `QDesktopServices`; Wireshark/dumpcap tìm theo `PATH`, nhánh Windows tách riêng |
+| 11 | `_stop_server` gọi `shutdown()` **trên UI thread** (join từng phiên tới 5 s) | Chỉ `request_stop()`, dọn state ở slot `finished`; chỉ chờ đồng bộ khi đóng cửa sổ |
+| 12 | `ServerThread` phát `ready` **trước khi bind** | `serve_forever(on_ready=...)` gọi sau khi listener mở |
+| 13 | Rate limit tính **cả gói replay** của phiên đang chạy | Xử lý replay trước, rate limit sau |
+| 14 | `_check_disk_budget` gọi `resolve_path()` (I/O) **dưới lock** | Chỉ chụp tên dưới lock, resolve ngoài lock |
+| 15 | `LogBridge` set **root logger = DEBUG** | Chỉ set logger `tftp` |
+| 16 | netascii là vòng lặp Python **từng byte** | `bytes.replace` (C) + test property so với bản tham chiếu |
+| 17 | Package tên `src` (đụng tên chung khi `pip install`) | Đổi thành **`tftp/`**: `python -m tftp.tftp_server`, entry point `tftp.tftp_server:main` |
+| 18 | `portal.css` minify tay 4 dòng; `files/test1` 1,9 MB không ai dùng | CSS format lại (đã kiểm: chỉ đổi khoảng trắng); xoá `test1` |
+| 19 | `enable_utf8_console` gọi nhiều lần, chỉ CLI | Idempotent, gọi thêm trong `setup_logging` |
+
+### Kiểm chứng sau pass này
+
+```
+python -m unittest discover   → Ran 233 tests — OK
+ruff check .                  → All checks passed
+mypy tftp                     → Success: no issues found in 20 source files
+```
+
+Thời gian chạy bộ test còn **giảm** so với trước (37 s so với 41 s cho phần
+không soak) vì bug số 7 từng làm mỗi lượt upload chậm thêm đúng một `timeout`.
 

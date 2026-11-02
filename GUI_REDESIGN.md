@@ -259,8 +259,8 @@ lệch nhau):
 | P3 | Motion v2 (§6) + copywriting (§7) | `motion.py`, `main_window.py` | Resize giữa slide không kẹt |
 | P4 | README/docs cập nhật ảnh mới | `README.md`, `docs/` | — |
 
-Sau mỗi phase: `ruff check tftp` + `python -m unittest discover` (giữ toàn bộ 166
-test xanh) + smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
+Sau mỗi phase: `ruff check tftp` + `python -m unittest discover` (giữ toàn bộ test
+xanh) + smoke GUI offscreen (`QT_QPA_PLATFORM=offscreen`).
 
 **Ràng buộc bất biến**: QPainter+QPalette (không QSS toàn cục); Fusion style;
 worker/thread/signal API giữ nguyên; hỗ trợ light+dark; cửa sổ tối thiểu

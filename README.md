@@ -16,16 +16,21 @@ phần tùy chọn cần cài dependency riêng.
 | Cấu hình | `tftp/tftp_config.py` | JSON strict, kiểm tra trước khi chạy |
 | Logging | `tftp/tftp_logging.py` | Log rotation dùng stdlib |
 | Số liệu | `tftp/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
+| Ghi file | `tftp/tftp_fs.py` | Commit atomic không ghi đè, có fallback cho filesystem không hỗ trợ hard link |
 | Test | `tests/` | Unit + tích hợp + fuzz + soak, gồm IPv4/IPv6 |
 
 ## 1. Cài đặt
 
-Không cần cài thêm gói nào, chỉ cần Python 3.10 trở lên:
+Không cần cài thêm gói nào, chỉ cần Python 3.10 trở lên. Đứng tại thư mục
+repository (thư mục chứa `pyproject.toml`) rồi chạy:
 
 ```bash
-cd "Trivial File Transfer Protocol"
 python --version
+python -m pip install -e .            # cài package "tftp" + 4 lệnh tftp-*
 ```
+
+Cài đặt là tuỳ chọn: có thể chạy trực tiếp bằng `python -m tftp.tftp_server`
+mà không cần `pip install`.
 
 GUI là **tuỳ chọn**, cần PySide6:
 
@@ -163,8 +168,9 @@ python -m tftp.tftp_gui
 | `--max-clients` | `32` | số phiên đồng thời tối đa |
 | `--max-file-size` | 256 MiB | giới hạn mỗi file upload (0 = không giới hạn) |
 | `--min-free-bytes` | 16 MiB | luôn chừa lại dung lượng trống tối thiểu |
-| `--max-total-bytes` | không giới hạn | quota tổng thư mục gốc |
-| `--max-transfer-seconds` | `3600` | thời gian tối đa một transfer (0 = không giới hạn) |
+| `--max-total-bytes` | 500 MiB | quota tổng thư mục gốc (0 = không giới hạn) |
+| `--evict-oldest` | tắt | khi đầy quota thì **xoá file cũ nhất** để nhận upload |
+| `--max-transfer-seconds` | `3600` | thời gian tối đa một transfer, áp cho cả RRQ và WRQ (0 = không giới hạn) |
 | `--tid-port-range` | ngẫu nhiên | dải port TID, ví dụ `50000-50100` |
 | `--cleanup-temp-age` | `86400` | xóa file `.part` cũ hơn N giây khi khởi động |
 | `--allow-subdirs` | tắt | cho phép `incoming/file` trong root (mặc định chặn mọi `/`) |
@@ -182,6 +188,11 @@ python -m tftp.tftp_gui
 > không thể chia `root` thành `incoming/`, `public/`... Dùng `--allow-subdirs`
 > để mở (vẫn chặn `..`, đường dẫn tuyệt đối, ký tự điều khiển `< > : " | ? *`,
 > tên réserved Windows `CON/NUL/...`, và kiểm tra `commonpath` trong root).
+
+> **Quota không tự xoá dữ liệu**: khi chạm `--max-total-bytes`, server **từ chối**
+> upload bằng `ERROR 3`. Chỉ khi bật `--evict-oldest` (hoặc tick ô tương ứng
+> trong GUI) server mới xoá file cũ nhất để nhường chỗ, và mỗi lần xoá đều ghi
+> log mức `WARNING` kèm đường dẫn.
 
 ### Client
 
@@ -303,6 +314,7 @@ python -m unittest tests.test_net -v     # IPv4/IPv6, dual-stack, chính sách g
 python -m unittest tests.test_config -v  # cấu hình JSON + log rotation
 
 ruff check .                             # lint
+python -m mypy tftp                      # type check toàn package (kể cả GUI)
 ```
 
 Test tích hợp tự bật server trên một port ngẫu nhiên nên **không cần quyền admin**
@@ -339,6 +351,13 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 27 | IPv6 end-to-end | RRQ/WRQ qua `::1`, tự skip nếu máy không có IPv6 loopback |
 | 28 | dual-stack | hai listener IPv4/IPv6 cùng port, TID đúng family |
 | 29 | symlink/reparse | RRQ không đọc được file link ra ngoài root |
+| 30 | quota an toàn | mặc định **từ chối** khi đầy quota, không xoá file người dùng |
+| 31 | deadline tải về | RRQ cũng bị chặn bởi `--max-transfer-seconds` như WRQ |
+| 32 | filesystem không hard link | exFAT/FAT32 (USB) vẫn upload/download được (fallback `O_EXCL`) |
+| 33 | cổng độc quyền | hai server không thể bind trùng một cổng UDP |
+| 34 | WRQ + OACK | client gửi thẳng DATA 1, không gửi ACK 0 thừa (RFC 2347) |
+| 35 | dally ACK cuối | client gửi lặp DATA cuối vẫn được ACK lại (RFC 1350 §5) |
+| 36 | RTT metric | `exchange.rtt` không bao giờ ghi uptime của process |
 
 Soak test nặng hơn bằng biến môi trường:
 
@@ -383,7 +402,8 @@ port 6969 → chuột phải → **Decode As…** → TFTP.
 tshark -i any -f "udp and host 127.0.0.1" -Y "udp && ip.addr == 127.0.0.1" -V
 ```
 
-Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 → ...`.
+Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 → ...` (với WRQ là
+`WRQ → OACK → DATA 1 → ACK 1 → ...`, không có `ACK 0`).
 
 ## 9. Đặc điểm đã triển khai
 

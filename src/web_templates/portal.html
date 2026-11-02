@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17211f">
+  <title>TFTP Drop · File & trò chuyện trong LAN</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+  <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="TFTP Drop, trang chủ"><span class="mark" aria-hidden="true">▥</span> TFTP <span>DROP</span></a>
+    <span class="network"><i aria-hidden="true"></i> MẠNG NỘI BỘ</span>
+    <div id="account" hidden><span id="username"></span><button id="logout" class="quiet" type="button">Đăng xuất ↗</button></div>
+  </header>
+
+  <main>
+    <p id="boot-status" class="notice" role="status">Đang kết nối máy chủ…</p>
+    <button id="reconnect" class="quiet" type="button" hidden>Thử kết nối lại</button>
+    <noscript>Vui lòng bật JavaScript để đăng nhập, truyền file và trò chuyện.</noscript>
+    <section id="auth" class="auth-layout" hidden aria-label="Truy cập cổng LAN">
+      <div class="welcome">
+        <p class="eyebrow">CÙNG MỘT MẠNG. CÙNG MỘT KHÔNG GIAN.</p>
+        <h1>Chuyển file.<br><span>Nối cuộc trò chuyện.</span></h1>
+        <p class="lead">Một nơi để chia sẻ tài liệu và trao đổi với mọi người trong mạng LAN của bạn.</p>
+        <div class="feature"><span>01 /</span><p><strong>File ngay trong tầm tay</strong><br>Gửi lên, xem danh sách và tải về từ máy chủ.</p></div>
+        <div class="feature"><span>02 /</span><p><strong>Trao đổi cùng mọi người</strong><br>Một phòng chat chung cho các thành viên.</p></div>
+        <p class="footnote">Thiết bị cần kết nối cùng mạng với máy chủ.</p>
+      </div>
+      <div class="auth-panel">
+        <div class="tabs" role="group" aria-label="Chọn đăng nhập hoặc đăng ký">
+          <button id="login-tab" type="button" aria-pressed="true">Đăng nhập</button>
+          <button id="register-tab" type="button" aria-pressed="false">Tạo tài khoản</button>
+        </div>
+        <h2 id="auth-title">Chào mừng trở lại.</h2>
+        <p id="auth-copy" class="muted">Đăng nhập để truy cập file và phòng chat.</p>
+        <form id="auth-form">
+          <label for="auth-name">Tên tài khoản</label>
+          <input id="auth-name" name="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_]{3,32}" autocomplete="username" aria-describedby="name-help">
+          <p id="name-help" class="hint">3–32 ký tự: chữ không dấu, số hoặc dấu _.</p>
+          <label for="auth-password">Mật khẩu</label>
+          <input id="auth-password" name="password" type="password" required minlength="8" maxlength="128" autocomplete="current-password" aria-describedby="password-help">
+          <p id="password-help" class="hint">Từ 8 đến 128 ký tự.</p>
+          <div id="confirm-field" hidden>
+            <label for="auth-confirm">Nhập lại mật khẩu</label>
+            <input id="auth-confirm" type="password" maxlength="128" autocomplete="new-password">
+          </div>
+          <p id="auth-error" class="error" role="alert" hidden></p>
+          <button id="auth-submit" class="primary full" type="submit" disabled>Vào không gian chung <span aria-hidden="true">→</span></button>
+        </form>
+        <p class="auth-note">Tài khoản được lưu trên máy chủ LAN này.</p>
+      </div>
+    </section>
+
+    <section id="workspace" hidden aria-label="Không gian chia sẻ">
+      <div class="workspace-heading"><div><p class="eyebrow">KHÔNG GIAN CHUNG</p><h1>Gửi. Nhận. <span>Kết nối.</span></h1></div><p class="muted">File và cuộc trò chuyện<br>trong mạng của bạn.</p></div>
+      <div class="workspace-grid">
+        <section class="files-panel panel" aria-labelledby="files-heading">
+          <div class="panel-heading"><div><p class="eyebrow">01 / CHIA SẺ</p><h2 id="files-heading">File trên máy chủ <span id="file-count" class="count">0</span></h2></div><button id="refresh-files" class="quiet" type="button">Làm mới ↻</button></div>
+          <form id="upload-form" class="upload-area">
+            <label for="upload-file">Gửi thêm một file</label>
+            <p class="hint" id="upload-limit">File được chuyển tới máy chủ trong LAN.</p>
+            <div class="upload-row"><input id="upload-file" name="file" type="file" required aria-describedby="upload-limit"><button class="primary" type="submit" id="upload-submit">Gửi file ↑</button></div>
+          </form>
+          <p id="file-status" class="notice" role="status" hidden></p>
+          <div class="table-scroll"><table><thead><tr><th scope="col">TÊN FILE</th><th scope="col">DUNG LƯỢNG</th><th scope="col"><span class="sr-only">Thao tác</span></th></tr></thead><tbody id="file-list"></tbody></table></div>
+          <p id="files-empty" class="empty" hidden>Chưa có file nào. Gửi file đầu tiên để bắt đầu chia sẻ.</p>
+          <p class="panel-footnote">Danh sách dùng chung cho các thành viên đã đăng nhập.</p>
+        </section>
+        <section class="chat-panel panel" aria-labelledby="chat-heading">
+          <div class="panel-heading"><div><p class="eyebrow">02 / TRÒ CHUYỆN</p><h2 id="chat-heading">Phòng chat chung</h2></div><span id="chat-state" class="chat-state" role="status">Đang kết nối</span></div>
+          <div id="messages" class="messages" role="log" aria-label="Tin nhắn trong phòng chung" aria-live="polite" aria-relevant="additions"><p id="chat-empty" class="empty">Chưa có tin nhắn.<br>Bắt đầu bằng một lời chào!</p></div>
+          <button id="new-messages" type="button" class="quiet" hidden>Xem tin nhắn mới ↓</button>
+          <form id="chat-form" class="chat-compose">
+            <label for="chat-body">Tin nhắn của bạn</label>
+            <textarea id="chat-body" name="body" rows="2" maxlength="2000" required placeholder="Viết lời nhắn cho mọi người…" aria-describedby="chat-help"></textarea>
+            <div class="compose-bottom"><span id="chat-help" class="hint">Enter để gửi · Shift + Enter xuống dòng</span><button id="chat-submit" class="primary" type="submit">Gửi ↗</button></div>
+            <p id="chat-error" class="error" role="alert" hidden></p>
+          </form>
+        </section>
+      </div>
+    </section>
+    <footer><span>TFTP DROP <span class="muted">/ LAN WORKSPACE</span></span><span>Kết nối nội bộ · HTTP không mã hóa</span></footer>
+  </main>
+</body>
+</html>

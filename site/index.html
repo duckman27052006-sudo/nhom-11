@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#17211f">
-    <meta name="description" content="Mở cổng gửi file TFTP trong mạng Wi-Fi nội bộ của bạn.">
-    <title>Mở cổng gửi file · TFTP</title>
+    <meta name="description" content="Mở cổng file và phòng chat TFTP trong mạng Wi-Fi nội bộ của bạn.">
+    <title>Cổng file & chat trong LAN · TFTP</title>
     <link rel="stylesheet" href="./site.css">
     <script src="./site.js" defer></script>
   </head>
@@ -21,15 +21,15 @@
     <main>
       <section class="intro" aria-labelledby="page-title">
         <p class="eyebrow">CỔNG VÀO MẠNG NỘI BỘ</p>
-        <h1 id="page-title">Gửi file tới<br><span>máy chủ TFTP.</span></h1>
+        <h1 id="page-title">Chia sẻ file.<br><span>Trò chuyện trong LAN.</span></h1>
         <p class="intro-copy">
-          Kết nối cùng Wi-Fi với máy chủ, nhập địa chỉ cổng upload nội bộ để tiếp tục.
+          Kết nối cùng Wi-Fi với máy chủ, mở cổng LAN rồi đăng nhập để gửi, tải file và trò chuyện.
         </p>
       </section>
 
-      <section class="handoff" aria-label="Mở cổng upload nội bộ">
+      <section class="handoff" aria-label="Mở cổng file và chat nội bộ">
         <form id="lan-form" novalidate>
-          <label for="lan-url">Địa chỉ cổng upload trong mạng của bạn</label>
+          <label for="lan-url">Địa chỉ cổng LAN trong mạng của bạn</label>
           <div class="field-row">
             <input
               id="lan-url"
@@ -41,7 +41,7 @@
               aria-describedby="address-help address-error"
               required
             >
-            <button type="submit">Mở cổng upload <span aria-hidden="true">↗</span></button>
+            <button type="submit">Mở cổng LAN <span aria-hidden="true">↗</span></button>
           </div>
           <p class="help" id="address-help">
             Ví dụ: <code>http://192.168.1.10:8080</code>. Địa chỉ này do người quản lý máy chủ cung cấp.
@@ -56,11 +56,11 @@
       </section>
 
       <section class="instructions" aria-label="Cách sử dụng">
-        <h2>Trước khi gửi</h2>
+        <h2>Bắt đầu chia sẻ</h2>
         <ol>
           <li>Thiết bị phải kết nối cùng mạng Wi-Fi với máy chủ.</li>
-          <li>Nhập địa chỉ LAN của cổng upload rồi mở trang đó.</li>
-          <li>Chọn file và gửi. Máy chủ chuyển file tới TFTP qua WRQ.</li>
+          <li>Nhập địa chỉ cổng LAN rồi mở trang đó.</li>
+          <li>Đăng ký hoặc đăng nhập để gửi, tải file và vào phòng chat chung.</li>
         </ol>
       </section>
 

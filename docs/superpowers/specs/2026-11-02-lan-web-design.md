@@ -83,5 +83,5 @@ kết nối Internet, không phù hợp phạm vi LAN đã chọn).
 - [x] Khảo sát repository và commit gần nhất.
 - [x] Chốt phạm vi LAN với người dùng.
 - [x] So sánh phương án, viết và tự rà soát thiết kế.
-- [ ] Người dùng duyệt bản thiết kế bằng văn bản.
-- [ ] Lập kế hoạch, triển khai và kiểm thử.
+- [x] Người dùng duyệt bản thiết kế bằng văn bản ("triển khai", ngày 2026-11-02).
+- [x] Lập kế hoạch, triển khai và kiểm thử.

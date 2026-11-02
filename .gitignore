@@ -50,6 +50,12 @@ desktop.ini
 .vscode/
 .idea/
 
+# LAN web accounts, sessions and messages (never publish runtime data)
+web-data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # Build
 dist/
 build/

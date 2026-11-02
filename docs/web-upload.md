@@ -1,113 +1,121 @@
-# Cổng web chuyển tiếp file qua TFTP trong mạng LAN
+# Cổng file và chat TFTP trong LAN
 
-Cổng này giúp người dùng gửi file từ trình duyệt mà không cần cài client TFTP
-hay tải repository. Trình duyệt gửi HTTP multipart tới web app; web app tạm
-ghi file để dùng TFTP client tích hợp gửi WRQ tới TFTP server. File cuối cùng
-được TFTP server lưu trong thư mục gốc TFTP, không phải thư mục riêng của web.
-Trình duyệt không tự gửi UDP/TFTP.
+Cổng web cung cấp đăng ký/đăng nhập/đăng xuất, danh sách file, gửi/tải file và
+phòng chat chung. Mọi thao tác file/chat yêu cầu đăng nhập. Đăng ký thành công
+tự đăng nhập. Máy chủ giữ tài khoản và tin nhắn qua các lần khởi động.
 
-## Cài đặt và khởi động trên Windows
+## Cài đặt và chạy
 
-Trong thư mục project:
+Yêu cầu Python 3.10+. Tại thư mục repository:
 
 ```powershell
 python -m pip install -e ".[web]"
-ipconfig
-python -m src.web_upload `
-  --host 192.168.1.10 `
-  --port 8080 `
-  --allowed-network 192.168.1.0/24 `
-  --tftp-server 127.0.0.1:6969
 ```
 
-Thay địa chỉ mẫu bằng IPv4 private trên máy chủ và đúng subnet LAN. Chỉ mở
-**TCP 8080** trong Windows Defender Firewall cho subnet client đã duyệt; không
-mở cổng cho mọi địa chỉ. Người dùng cùng LAN truy cập
-`http://192.168.1.10:8080`. TFTP server cần chạy và nhận được tại địa chỉ
-`--tftp-server`; mở UDP cho TFTP theo cấu hình server. Nếu gateway và TFTP server
-cùng máy, địa chỉ loopback mặc định là phù hợp.
-
-### Dùng GitHub Pages làm link vào
-
-Trang tĩnh GitHub Pages của repository có địa chỉ
-`https://duckman27052006-sudo.github.io/nhom-11/`. Trang này không nhận file:
-người dùng nhập URL gateway LAN một lần, trang lưu URL trong trình duyệt rồi
-chuyển tới gateway. Upload chỉ hoạt động khi thiết bị đang kết nối cùng mạng và
-truy cập được gateway. File không được gửi lên GitHub.
-
-GitHub Pages chỉ host nội dung tĩnh, không chạy gateway TFTP. Vì vậy trang Pages
-mở gateway bằng điều hướng rõ ràng thay vì gửi request từ HTTPS GitHub tới
-HTTP/private IP, vốn bị trình duyệt chặn. Người quản lý cung cấp địa chỉ gateway
-LAN cho người dùng, ví dụ `http://192.168.1.10:8080`. Có thể cấu hình DNS nội bộ
-để dùng tên dễ nhớ như `http://upload.lan:8080`.
-
-Workflow `.github/workflows/pages.yml` triển khai thư mục `site/` khi có thay đổi
-trên nhánh `main`. Bật GitHub Pages cho repository với nguồn **GitHub Actions**.
-Trang Pages công khai; không đưa thông tin bí mật hoặc file người dùng lên đó.
-
-TFTP server là nơi thực thi quyền ghi đè, giới hạn dung lượng, quota, dung lượng
-đĩa và lưu file. Bật `--overwrite` trên TFTP server nếu muốn cho phép ghi đè;
-mặc định file trùng tên bị từ chối. TFTP server ghi log phiên WRQ từ máy gateway.
-Web log giữ địa chỉ IP trình duyệt để đối chiếu; TFTP server sẽ thấy địa chỉ
-mạng của máy chạy gateway, không phải IP trình duyệt.
-
-Mặc định app chỉ bind `127.0.0.1`, nên không truy cập được từ máy khác. Đây là
-chủ ý fail-closed. `--host` bắt buộc là IP private/loopback cụ thể; wildcard
-`0.0.0.0`/`::` và địa chỉ public bị từ chối. Cần ít nhất một `--allowed-network`
-private/loopback; có thể truyền cờ này nhiều lần nếu cần cho các subnet đã duyệt.
-
-IPv6 LAN cũng được hỗ trợ bằng IP private cụ thể và subnet ULA, ví dụ:
+Terminal thứ nhất:
 
 ```powershell
-python -m src.web_upload `
-  --host fd12:3456:789a::10 `
-  --port 8080 `
-  --allowed-network fd12:3456:789a::/64 `
-  --tftp-server "[::1]:6969"
+python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files --no-overwrite
 ```
 
-Waitress chỉ bind family của địa chỉ host đã chỉ định. Muốn phục vụ cả IPv4 và
-IPv6 thì chạy hai instance riêng, mỗi instance có địa chỉ và subnet allowlist
-riêng, hoặc đặt reverse proxy nội bộ có cấu hình ACL đúng. Không dùng proxy
-header để giả địa chỉ client: ACL dựa trên peer IP thực. TFTP server cũng phải
-lắng nghe trên IPv6 để nhận kết nối tại `[::1]:6969`.
+Terminal thứ hai, chạy thử trên cùng máy:
 
-## Giới hạn và chính sách file
+```powershell
+python -m src.web_upload --host 127.0.0.1 --port 8080 --root files
+```
 
-- Mặc định giới hạn HTTP 100 MiB mỗi file, điều chỉnh bằng `--max-file-size`
-  (MiB). TFTP server cũng áp dụng các giới hạn của chính nó.
-- Tên file được làm sạch trước khi gửi WRQ; TFTP server xử lý xung đột tên.
-- Web app giữ một bản tạm ngắn hạn trên máy gateway để TFTP client đọc khi gửi.
-  Bản tạm được xóa sau khi transfer thành công hoặc thất bại; file hoàn chỉnh
-  chỉ được lưu theo chính sách của TFTP server.
-- Không có route để liệt kê hay tải file; chỉ người có quyền hệ thống trên thư
-  mục gốc TFTP mới xem/quản lý được dữ liệu.
-- Cổng upload không quét virus và không xác thực danh tính người gửi. Nếu cần
-  kiểm tra malware, chuyển file vào vùng quarantine và quét trước khi sử dụng.
+Mở `http://127.0.0.1:8080`. Có thể dùng entry point `tftp-web-upload` thay cho
+`python -m src.web_upload` sau khi cài package.
 
-## Ranh giới mạng và bảo mật
+## Cho thiết bị cùng LAN truy cập
 
-Đây là HTTP không TLS dành cho LAN được kiểm soát. Allowlist private CIDR và bind
-vào IP private là defense-in-depth, **không phải xác thực người dùng**. Không
-port-forward từ router, không đưa ra Internet và không coi Wi-Fi công cộng,
-guest network hoặc mạng dùng chung là LAN tin cậy. Dữ liệu nhạy cảm cần kênh
-HTTPS có xác thực hoặc giao thức truyền file an toàn.
+Chạy `ipconfig`, lấy IPv4 và subnet của card Wi-Fi/Ethernet đang dùng. Ví dụ
+máy chủ có IP `192.168.1.10`, subnet mask `255.255.255.0`:
 
-Gateway kiểm tra peer IP, `Origin` và token CSRF của trang, giới hạn request/file,
-thêm CSP và các security headers cơ bản. Không bật CORS hoặc proxy trust mặc
-định. Đường truyền HTTP đến gateway không mã hóa; đoạn gateway tới TFTP server
-cũng dùng TFTP thuần, vốn không có xác thực hay mã hóa.
+```powershell
+python -m src.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --tftp-server 127.0.0.1:6969 --root files
+```
 
-## Chạy như dịch vụ
+Thiết bị cùng LAN mở `http://192.168.1.10:8080`. Cho phép TCP 8080 trong Windows
+Defender Firewall cho subnet LAN đã chọn, không tự mở firewall cho mọi mạng.
+Thiết bị không cần cài TFTP client. Khi gateway và TFTP dùng loopback, không cần
+mở UDP ra LAN. Guest Wi-Fi/client isolation có thể ngăn thiết bị kết nối nhau.
 
-Đối với triển khai lâu dài, cài package extras `[web]`, chạy entry point
-`tftp-web-upload` qua Windows Service manager (ví dụ NSSM) bằng tài khoản không
-đặc quyền, cấu hình restart/log/working directory và giới hạn firewall. Không
-dùng Flask development server; lệnh trên dùng Waitress. Xem thêm hướng dẫn nền
-tảng trong `docs/deployment.md`.
+`--host` phải là IP private/loopback cụ thể, không dùng `0.0.0.0` hoặc địa chỉ public.
+Bind LAN bắt buộc có `--allowed-network`; có thể lặp lại cờ cho nhiều subnet.
+ACL dùng địa chỉ kết nối thực, bỏ qua `X-Forwarded-For`. Không cấu hình reverse
+proxy làm peer chung nếu muốn giữ ACL cho từng client.
 
-## Kiểm thử
+## Cấu hình
+
+| Tham số | Mặc định | Công dụng |
+|---|---|---|
+| `--host` | `127.0.0.1` | IP web cụ thể |
+| `--port` | `8080` | TCP port web |
+| `--allowed-network` | loopback khi bind loopback | Subnet được phép truy cập |
+| `--root` | `files` | Cùng thư mục root với TFTP server |
+| `--tftp-server` | `127.0.0.1:6969` | IPv4 hoặc hostname và UDP port TFTP |
+| `--data-dir` | `web-data` | Dữ liệu tài khoản/phiên/chat, nằm ngoài root TFTP |
+| `--max-file-size` | `100` | MiB tối đa mỗi file, cả tải và gửi |
+| `--secure-cookie` | tắt | Chỉ dùng nếu phục vụ web qua HTTPS |
+
+Chạy hai tiến trình cùng máy với cùng root. TFTP không hỗ trợ liệt kê file, nên
+gateway đọc danh sách từ thư mục root. Nếu đổi root ở một bên phải đổi bên còn lại.
+TFTP client hiện dùng IPv4; web có thể bind IPv6 private/loopback nhưng đích TFTP
+vẫn cần IPv4 hoặc hostname phân giải thành IPv4.
+
+## Tài khoản và chat
+
+- Tên tài khoản 3–32 ký tự: chữ ASCII, số, dấu `_`; tên trùng không phân biệt hoa thường.
+- Mật khẩu 8–128 ký tự, lưu hash có salt. Phiên 12 giờ, cookie HttpOnly và
+  SameSite=Lax; đăng xuất hủy phiên phía server. Có CSRF và giới hạn đăng nhập/đăng ký.
+- Một phòng chat chung, không có tin nhắn riêng hoặc vai trò quản trị. Tin 1–2.000
+  ký tự, tối đa 30 tin/phút mỗi tài khoản. Nội dung hiển thị như văn bản thuần.
+- Mở phòng tải 50 tin mới nhất; cập nhật mỗi 2 giây. Thời gian theo thiết bị người xem.
+- Sao lưu `web-data/portal.sqlite3` bằng SQLite backup khi đang chạy hoặc sao chép
+  cả thư mục dữ liệu sau khi dừng gateway. Giữ thư mục này riêng tư và không commit.
+- Không có chức năng khôi phục mật khẩu, duyệt tài khoản hay xóa tin trong phiên bản này.
+
+## File và giới hạn
+
+Gateway nhận HTTP multipart rồi gửi WRQ qua TFTP; tải file bằng RRQ rồi trả HTTP
+attachment. Trình duyệt không trực tiếp gửi UDP. File tạm nằm trong data-dir và
+được dọn sau khi kết thúc hoặc lỗi; tối đa bốn lượt truyền đồng thời. Nếu tiến
+trình bị tắt cưỡng bức, quản lý có thể xóa các thư mục còn lại trong
+`web-data/temporary/` sau khi dừng gateway.
+
+Mọi thành viên đã đăng nhập dùng chung danh sách file. Chỉ phục vụ file ngay trong
+root; không cho duyệt thư mục con, symlink, tên đường dẫn hoặc file `.part`.
+Lõi TFTP yêu cầu tên ASCII: file upload có dấu được đổi sang tên không dấu
+(ví dụ `Đề tài.txt` → `De_tai.txt`) và giao diện báo tên đã lưu. File được quản lý
+chép trực tiếp vào root cần có tên ASCII để xuất hiện trong danh sách web.
+Giữ quyền ghi đè/giới hạn của TFTP server; khuyến nghị `--no-overwrite` như lệnh mẫu.
+Không có chức năng xóa file trên web. File tải về luôn là attachment, không mở
+HTML do người dùng gửi trong origin của ứng dụng.
+
+Đây là HTTP LAN không mã hóa, không phải dịch vụ Internet. Chỉ dùng trên mạng
+tin cậy; không port-forward router. TFTP thuần không có xác thực/mã hóa: tài khoản
+web chỉ bảo vệ cổng HTTP. Giữ TFTP bind loopback để người khác không bỏ qua tài
+khoản bằng TFTP trực tiếp. Không quét virus tự động; chỉ mở file từ nguồn tin cậy.
+
+## GitHub Pages
+
+Trang `site/` tiếp tục làm cổng vào: nhập địa chỉ LAN rồi chuyển trình duyệt tới
+gateway. Đăng nhập, file và chat chạy trên máy chủ LAN, không lưu trên GitHub.
+Pages không chạy Python/SQLite và không thể thay gateway. Workflow Pages chỉ
+triển khai `site/`; không đưa data-dir hoặc file người dùng vào thư mục này.
+
+## Chạy lâu dài và kiểm thử
+
+CLI dùng Waitress, không dùng Flask development server. Có thể cấu hình dịch vụ
+Windows với working directory là repository, tài khoản không đặc quyền, log và
+restart; chạy TFTP riêng và bật gateway sau khi TFTP sẵn sàng.
 
 ```powershell
 python -m unittest tests.test_web_upload -v
+python -m unittest discover -v
+ruff check .
 ```
+
+CI cài extras `[web]` để chạy test web. Nếu không cài Flask, suite web được bỏ qua
+để các kiểm thử lõi TFTP vẫn dùng được trong môi trường không có dependency web.

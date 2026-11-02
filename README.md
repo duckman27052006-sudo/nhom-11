@@ -63,6 +63,42 @@ shimmer khi chưa rõ tổng, ô số liệu đếm tăng dần, toast góc ph�
 
 ## 2. Chạy thử nhanh (2 cửa sổ terminal)
 
+### Bản web LAN: tài khoản, tải file và chat
+
+Cài dependency web:
+
+```powershell
+python -m pip install -e ".[web]"
+```
+
+Mở hai terminal tại thư mục repository:
+
+```powershell
+# Terminal 1: TFTP server; không ghi đè file trùng tên
+python -m src.tftp_server --host 127.0.0.1 --port 6969 --root files --no-overwrite
+
+# Terminal 2: chạy thử trên máy này
+python -m src.web_upload --host 127.0.0.1 --port 8080 --root files
+```
+
+Mở `http://127.0.0.1:8080`, tạo tài khoản để xem/gửi/tải file và trò chuyện trong
+phòng chat chung. Đăng ký thành công tự đăng nhập. Tài khoản, phiên và lịch sử
+chat lưu trong `web-data/`, tách khỏi thư mục file.
+
+Cho điện thoại/máy khác cùng LAN truy cập: thay lệnh terminal 2 bằng lệnh sau
+(đổi IP/subnet mẫu thành mạng thực tế, xem `ipconfig`):
+
+```powershell
+python -m src.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.168.1.0/24 --root files
+```
+
+Thiết bị cùng mạng mở `http://192.168.1.10:8080`. Cho phép TCP 8080 trong firewall
+chỉ cho subnet LAN cần dùng. TFTP qua loopback nên không cần mở UDP cho thiết bị web.
+HTTP LAN không mã hóa; chỉ dùng trong mạng tin cậy. Hướng dẫn đầy đủ:
+[Cổng web LAN](docs/web-upload.md).
+
+### Bản CLI
+
 ### Cửa sổ 1 — khởi động server
 
 ```bash

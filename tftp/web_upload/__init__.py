@@ -92,7 +92,11 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     temporary_root.mkdir(exist_ok=True)
     app.config["MAX_CONTENT_LENGTH"] = app.config["MAX_FILE_SIZE"] + 64 * 1024
     app.config["MAX_FORM_PARTS"] = 8
-    app.config["MAX_FORM_MEMORY_SIZE"] = 64 * 1024
+    # Werkzeug reads multipart bodies in 64 KiB chunks and may retain CR/LF
+    # bytes between chunks. A 64 KiB decoder limit then rejects valid binary
+    # files before TFTP runs. Leave bounded parser headroom; file sizes remain
+    # independently enforced by MAX_CONTENT_LENGTH and check_size().
+    app.config["MAX_FORM_MEMORY_SIZE"] = 512 * 1024
     networks = [private_network(value) for value in app.config["ALLOWED_NETWORKS"]]
     if not networks:
         raise UploadConfigError("Cần ít nhất một subnet LAN được phép.")

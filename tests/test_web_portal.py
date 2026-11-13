@@ -334,6 +334,77 @@ class WebTest(unittest.TestCase):
             self.assertEqual(response.status_code, 413)
         self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
 
+    def test_five_mib_binary_upload_survives_crlf_at_parser_chunk_edges(self):
+        self.register()
+        self.app.config.update(MAX_FILE_SIZE=5 * 1024 * 1024,
+                               MAX_CONTENT_LENGTH=5 * 1024 * 1024 + 64 * 1024)
+        boundary = "regression-upload-boundary"
+        prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                  'filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode()
+        ending = f"\r\n--{boundary}--\r\n".encode()
+        for retained in (b"\r", b"\n", b"\r\n"):
+            with self.subTest(retained=retained):
+                payload = bytearray(b"x" * (5 * 1024 * 1024))
+                offset = 64 * 1024 - len(prefix) - len(retained)
+                payload[offset:offset + len(retained)] = retained
+                body = prefix + payload + ending
+
+                def forward(local, remote, expected=payload):
+                    self.assertEqual(remote, "photo.jpg")
+                    self.assertEqual(Path(local).read_bytes(), expected)
+
+                with patch("tftp.web_upload.TftpClient.upload", side_effect=forward) as transfer:
+                    response = self.client.post(
+                        "/api/files", data=body,
+                        content_type=f"multipart/form-data; boundary={boundary}",
+                        headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+                self.assertEqual(response.status_code, 201, response.json)
+                self.assertEqual(response.json["size"], len(payload))
+                transfer.assert_called_once()
+                self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+
+    def test_five_mib_upload_reaches_real_tftp_server(self):
+        self.register()
+        # A newline at every possible 64 KiB chunk edge exercises the binary
+        # decoder carry-over regardless of the multipart header length.
+        payload = b"\r\n" * (5 * 1024 * 1024 // 2)
+        with ServerHarness() as server:
+            token = self.client.get_cookie(COOKIE).value
+            app = create_app({**self.config, "FILE_ROOT": server.root, "TFTP_PORT": server.port,
+                              "MAX_FILE_SIZE": 6 * 1024 * 1024})
+            client = app.test_client()
+            client.set_cookie(COOKIE, token)
+            response = client.post(
+                "/api/files", data={"file": (io.BytesIO(payload), "photo.jpg")},
+                headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+            self.assertEqual(response.status_code, 201, response.json)
+            self.assertEqual(server.read("photo.jpg"), payload)
+        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+
+    def test_file_limit_still_rejects_one_byte_over_five_mib(self):
+        self.register()
+        self.app.config.update(MAX_FILE_SIZE=5 * 1024 * 1024,
+                               MAX_CONTENT_LENGTH=5 * 1024 * 1024 + 64 * 1024)
+        with patch("tftp.web_upload.TftpClient.upload") as transfer:
+            response = self.client.post(
+                "/api/files", data={"file": (io.BytesIO(b"x" * (5 * 1024 * 1024 + 1)), "big.jpg")},
+                headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+        self.assertEqual(response.status_code, 413)
+        transfer.assert_not_called()
+        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+
+    def test_large_multipart_text_field_is_still_bounded(self):
+        self.register()
+        self.app.config.update(MAX_FILE_SIZE=5 * 1024 * 1024,
+                               MAX_CONTENT_LENGTH=5 * 1024 * 1024 + 64 * 1024)
+        with patch("tftp.web_upload.TftpClient.upload") as transfer:
+            response = self.client.post(
+                "/api/files", data={"note": "x" * (512 * 1024 + 1),
+                                    "file": (io.BytesIO(b"ok"), "small.jpg")},
+                headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+        self.assertEqual(response.status_code, 413)
+        transfer.assert_not_called()
+
     def test_tftp_failure_is_reported_and_cleaned(self):
         self.register()
         (self.config["FILE_ROOT"] / "hello.txt").write_bytes(b"hello")

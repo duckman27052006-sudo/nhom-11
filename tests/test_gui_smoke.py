@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -149,6 +150,57 @@ class TestGuiSmoke(unittest.TestCase):
         # Không có ElidedLabel, QLabel đòi ~3000 px cho 500 ký tự và cả trang
         # rộng ra ngoài cửa sổ; có nó thì nhãn chỉ đòi đúng bề rộng đang có.
         self.assertLess(label.minimumSizeHint().width(), self.window.width())
+
+    def test_launcher_autostart_allows_web_upload_without_clicking_start(self) -> None:
+        try:
+            from tftp.tftp_gui import build_application
+            from tftp.web_upload import create_app
+        except ModuleNotFoundError:
+            self.skipTest("cần extras web cho luồng GUI -> web -> TFTP")
+        from tests.test_web_upload import authenticated_client
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "files"
+            root.mkdir()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            self.window.root_edit.setText(str(root))
+            self.window.port_spin.setValue(port)
+            with (mock.patch("tftp.tftp_gui.QApplication", return_value=self.app),
+                  mock.patch("tftp.tftp_gui.MainWindow", return_value=self.window)):
+                build_application(["tftp-gui"], start_server=True)
+            try:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    pump(self.app, 0.02)
+                    if self.window.server and self.window.server.bound_port:
+                        break
+                self.assertIsNotNone(self.window.server)
+                self.assertEqual(self.window.server.bound_port, port)
+                self.assertEqual(self.window.host_edit.text(), "127.0.0.1")
+                web = create_app({"FILE_ROOT": root, "DATA_DIR": Path(directory) / "web-data",
+                                  "TFTP_PORT": port, "TESTING": True,
+                                  "ALLOWED_HOSTS": ["upload.lan", "localhost",
+                                                    "127.0.0.1", "::1"]})
+                client, csrf = authenticated_client(web)
+                import io
+
+                payload = b"uploaded through autostarted GUI server"
+                response = client.post(
+                    "/api/files", data={"file": (io.BytesIO(payload), "from-web.txt")},
+                    base_url="http://upload.lan",
+                    headers={"X-CSRF-Token": csrf, "Origin": "http://upload.lan"})
+                self.assertEqual(response.status_code, 201, response.json)
+                self.assertEqual((root / "from-web.txt").read_bytes(), payload)
+                with client.get("/api/files/from-web.txt", base_url="http://upload.lan") as result:
+                    self.assertEqual(result.status_code, 200)
+                    self.assertEqual(result.data, payload)
+            finally:
+                self.window._stop_server()
+                deadline = time.monotonic() + 5.0
+                while self.window.server is not None and time.monotonic() < deadline:
+                    pump(self.app, 0.02)
 
 
 if __name__ == "__main__":

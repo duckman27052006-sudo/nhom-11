@@ -6,6 +6,11 @@ tự đăng nhập. Máy chủ giữ tài khoản và tin nhắn qua các lần 
 
 ## Cài đặt và chạy
 
+Trên Windows, mở `tftp.bat`: launcher tự khởi động TFTP qua `127.0.0.1:6969`
+trong GUI rồi mở gateway web. Đợi GUI báo **Server đang chạy** trước khi gửi file.
+Nếu mở GUI thủ công bằng `python -m tftp.tftp_gui` thì vẫn cần bấm
+**Khởi động server**; thêm `--start-server` để tự bật TFTP loopback.
+
 Yêu cầu Python 3.10+. Tại thư mục repository:
 
 ```powershell
@@ -59,7 +64,13 @@ proxy làm peer chung nếu muốn giữ ACL cho từng client.
 | `--max-file-size` | `100` | MiB tối đa mỗi file, cả tải và gửi |
 | `--secure-cookie` | tắt | Chỉ dùng nếu phục vụ web qua HTTPS |
 | `--max-concurrent-uploads` | `4` | Tổng lượt tải/gửi đồng thời |
+| `--trusted-host` | địa chỉ bind + localhost | Host header được phép thêm (tên miền nội bộ); lặp lại được |
 | `--threads` | `8` | Số worker Waitress |
+
+Host header được kiểm tra theo allowlist để chặn DNS rebinding: mặc định chỉ
+chấp nhận địa chỉ bind, `localhost`, `127.0.0.1` và `::1`. Nếu người dùng mở
+portal bằng tên miền nội bộ (ví dụ `http://upload.lan:8080`), thêm
+`--trusted-host upload.lan`; không cần thêm khi truy cập bằng IP LAN.
 
 Chạy hai tiến trình cùng máy với cùng root. TFTP không hỗ trợ liệt kê file, nên
 gateway đọc danh sách từ thư mục root. Nếu đổi root ở một bên phải đổi bên còn lại.
@@ -109,6 +120,30 @@ Pages không chạy Python/SQLite và không thể thay gateway. Workflow Pages 
 triển khai `site/`; không đưa data-dir hoặc file người dùng vào thư mục này.
 
 ## Chạy lâu dài và kiểm thử
+
+### Khi web báo không kết nối được TFTP
+
+Trang web có thể đăng nhập/chat và liệt kê file ngay cả khi TFTP chưa chạy:
+các chức năng này dùng SQLite/thư mục trên máy, còn upload/download cần TFTP thực sự.
+
+- Mở TFTP Console, bấm **Khởi động server** và kiểm tra trạng thái đang chạy.
+- Gateway mặc định kết nối `127.0.0.1:6969`. Server cần nhận được ở địa chỉ này;
+  nếu bind riêng một IP LAN hoặc đổi cổng, sửa `--tftp-server IP:port` tương ứng.
+- Dùng cùng thư mục `--root` cho gateway và server, giữ cả hai tiến trình đang chạy.
+- Khi gateway/TFTP khác máy, kiểm tra firewall UDP ở máy TFTP và quyền ghi thư mục.
+
+Windows có thể báo `WinError 10054` khi không có dịch vụ ở cổng UDP đích. Web
+hiển thị HTTP 504 kèm địa chỉ/cổng và hướng dẫn khởi động, thay cho lỗi gửi file chung.
+
+### Health check
+
+`GET /healthz` kiểm tra cả SQLite (một truy vấn `SELECT 1`) lẫn TFTP (gửi RRQ
+một tên chắc chắn không tồn tại, coi ERROR trả về là server còn sống). Kết quả
+`200` khi cả hai OK, `503` kèm `{"status":"degraded","checks":{...}}` khi một
+thành phần lỗi. Kết quả được cache 5 giây để monitoring không tạo phiên TFTP
+liên tục; đổi bằng `HEALTH_CACHE_SECONDS` khi dùng `create_app`.
+
+### Dịch vụ và kiểm thử
 
 CLI dùng Waitress, không dùng Flask development server. Có thể cấu hình dịch vụ
 Windows với working directory là repository, tài khoản không đặc quyền, log và

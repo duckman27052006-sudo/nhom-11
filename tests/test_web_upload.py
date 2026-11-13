@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -23,6 +25,8 @@ except ModuleNotFoundError as exc:
     if exc.name not in {"flask", "werkzeug"}:
         raise
     create_app = None
+
+TEST_HOSTS = ["upload.lan", "localhost", "127.0.0.1", "::1"]
 
 
 def authenticated_client(app):
@@ -48,7 +52,8 @@ class TestWebUpload(unittest.TestCase):
         self.tftp_root = Path(self.temp.name) / "tftp-root"
         self.tftp_root.mkdir()
         self.app = create_app(
-            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data"},
+            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data",
+             "ALLOWED_HOSTS": TEST_HOSTS},
             allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
             tftp_host="127.0.0.1",
             tftp_port=6969,
@@ -80,6 +85,15 @@ class TestWebUpload(unittest.TestCase):
     def test_remote_outside_allowed_lan_is_denied(self):
         response = self.client.get("/", environ_base={"REMOTE_ADDR": "203.0.113.8"})
         self.assertEqual(response.status_code, 403)
+
+    def test_host_header_must_be_allowlisted(self):
+        self.assertEqual(self.client.get("/", headers={"Host": "upload.lan"}).status_code, 200)
+        self.assertEqual(self.client.get("/", headers={"Host": "evil.example"}).status_code, 400)
+        # IPv6 literal: port phải bị bỏ đúng, không cắt nhầm tại dấu ':' đầu tiên.
+        self.assertEqual(self.client.get("/", headers={"Host": "[::1]:8080"}).status_code, 200)
+        self.assertEqual(
+            self.client.get("/", headers={"Host": "[2001:db8::1]:8080"}).status_code, 400
+        )
 
     def test_upload_forwards_file_to_tftp_server(self):
         client_instances = []
@@ -127,7 +141,8 @@ class TestWebUpload(unittest.TestCase):
                 time.sleep(0.01)
             self.assertGreater(server.bound_port, 0)
             self.app = create_app(
-                {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data2"},
+                {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "data2",
+                 "ALLOWED_HOSTS": TEST_HOSTS},
                 allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
                 tftp_host="127.0.0.1",
                 tftp_port=server.bound_port,
@@ -149,6 +164,63 @@ class TestWebUpload(unittest.TestCase):
             server.shutdown()
             server.wait_for_idle(timeout=5)
             thread.join(timeout=5)
+
+    def test_healthz_reports_database_and_tftp(self):
+        server = TftpServer(
+            host="127.0.0.1",
+            port=0,
+            root=str(self.tftp_root),
+            timeout=0.5,
+            retries=1,
+            logger=logging.getLogger("tftp.test.health"),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.bound_port and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(server.bound_port, 0)
+            app = create_app(
+                {"FILE_ROOT": self.tftp_root,
+                 "DATA_DIR": Path(self.temp.name) / "health",
+                 "ALLOWED_HOSTS": TEST_HOSTS, "HEALTH_CACHE_SECONDS": 0},
+                allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+                tftp_host="127.0.0.1",
+                tftp_port=server.bound_port,
+            )
+            response = app.test_client().get("/healthz")
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(response.json["checks"], {"database": "ok", "tftp": "ok"})
+        finally:
+            server.shutdown()
+            server.wait_for_idle(timeout=5)
+            thread.join(timeout=5)
+
+    def test_healthz_reports_unreachable_tftp_and_database(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        app = create_app(
+            {"FILE_ROOT": self.tftp_root,
+             "DATA_DIR": Path(self.temp.name) / "health-down",
+             "ALLOWED_HOSTS": TEST_HOSTS, "HEALTH_CACHE_SECONDS": 0,
+             "HEALTH_TIMEOUT": 0.2},
+            allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+            tftp_host="127.0.0.1",
+            tftp_port=port,
+        )
+        client = app.test_client()
+        response = client.get("/healthz")
+        self.assertEqual(response.status_code, 503, response.json)
+        self.assertEqual(response.json["checks"]["database"], "ok")
+        self.assertEqual(response.json["checks"]["tftp"], "unreachable")
+
+        store = app.extensions["web_store"]
+        with patch.object(store, "ping", side_effect=sqlite3.OperationalError("db down")):
+            response = client.get("/healthz")
+        self.assertEqual(response.status_code, 503, response.json)
+        self.assertEqual(response.json["checks"]["database"], "error")
 
     def test_tftp_server_duplicate_is_returned_without_overwrite(self):
         def reject_duplicate(_local, _remote):
@@ -211,7 +283,8 @@ class TestWebUpload(unittest.TestCase):
 
     def test_only_allows_configured_number_of_concurrent_uploads(self):
         app = create_app(
-            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "concurrent"},
+            {"FILE_ROOT": self.tftp_root, "DATA_DIR": Path(self.temp.name) / "concurrent",
+             "ALLOWED_HOSTS": TEST_HOSTS},
             allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
             max_file_size=1024,
             max_concurrent_uploads=1,
@@ -292,6 +365,8 @@ class TestWebUpload(unittest.TestCase):
                 allowed_networks=["127.0.0.1/32"],
                 max_concurrent_uploads=0,
             )
+        with self.assertRaises(UploadConfigError):
+            create_app(allowed_hosts=["bad host"])
 
 
 def bytes_file(_filename: str, content: bytes) -> BytesIO:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import socket
 import sqlite3
 import tempfile
 import time
@@ -423,6 +424,33 @@ class WebTest(unittest.TestCase):
             response = self.client.post("/api/files", data={"file": (io.BytesIO(b"x"), name)},
                                         headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
             self.assertEqual(response.status_code, 400)
+
+    def test_upload_closed_udp_port_reports_server_start_instructions(self):
+        self.register()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.app.config.update(TFTP_PORT=port)
+        with self.assertLogs("tftp.web", level="ERROR"):
+            response = self.client.post(
+                "/api/files", data={"file": (io.BytesIO(b"real network failure"), "probe.txt")},
+                headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+        self.assertEqual(response.status_code, 504, response.json)
+        self.assertIn(f"127.0.0.1:{port}", response.json["error"])
+        self.assertIn("Khởi động server", response.json["error"])
+        self.assertNotIn(self.temp.name, response.json["error"])
+        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
+
+    def test_upload_network_reset_is_not_reported_as_file_error(self):
+        self.register()
+        with patch("tftp.web_upload.TftpClient.upload", side_effect=ConnectionResetError(10054)):
+            with self.assertLogs("tftp.web", level="ERROR"):
+                response = self.client.post(
+                    "/api/files", data={"file": (io.BytesIO(b"data"), "probe.txt")},
+                    headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("127.0.0.1:6969", response.json["error"])
+        self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
 
     def test_cli_rejects_public_wildcard_and_missing_allowlist(self):
         for args in [["--host", "0.0.0.0"], ["--host", "8.8.8.8"],

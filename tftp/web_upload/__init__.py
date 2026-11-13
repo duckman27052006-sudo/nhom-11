@@ -19,7 +19,7 @@ from werkzeug.utils import secure_filename
 from .. import enable_utf8_console
 from ..tftp_client import TftpClient
 from ..tftp_errors import TftpError
-from ..tftp_net import parse_host_port
+from ..tftp_net import format_endpoint, parse_host_port
 from ..web_store import SESSION_SECONDS, Store
 
 LOG = logging.getLogger("tftp.web")
@@ -265,6 +265,14 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         if current > app.config["MAX_FILE_SIZE"] or (total or 0) > app.config["MAX_FILE_SIZE"]:
             raise ValueError("File vượt quá dung lượng cho phép.")
 
+    def unavailable_message():
+        endpoint = format_endpoint(app.config["TFTP_HOST"], app.config["TFTP_PORT"])
+        return (
+            f"Không kết nối được TFTP tại {endpoint}. "
+            "Trên máy chủ, mở TFTP Console và bấm Khởi động server, "
+            "hoặc chạy TFTP server riêng. Kiểm tra địa chỉ/cổng --tftp-server nếu server đã chạy."
+        )
+
     @app.get("/api/files/<name>")
     def download(name):
         target = file_path(name)
@@ -342,12 +350,15 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
                 tftp_errors.ERR_DISK_FULL: 507,
                 tftp_errors.ERR_FILE_EXISTS: 409,
             }.get(exc.code, 502)
-            messages = {504: "TFTP server không phản hồi. Hãy thử lại sau.",
+            messages = {504: unavailable_message(),
                         403: "TFTP server từ chối quyền ghi file.",
                         507: "TFTP server không còn đủ dung lượng.",
                         409: "TFTP server đã có file trùng tên. Hãy đổi tên file."}
             LOG.exception("TFTP upload failed")
             return fail(messages.get(status, "TFTP server không thể tiếp nhận file."), status)
+        except (ConnectionError, TimeoutError):
+            LOG.exception("TFTP connection failed")
+            return fail(unavailable_message(), 504)
         except OSError:
             LOG.exception("TFTP upload failed")
             return fail("Không thể gửi file. Kiểm tra TFTP và chính sách ghi đè.", 502)

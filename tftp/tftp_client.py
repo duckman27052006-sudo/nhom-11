@@ -218,6 +218,14 @@ class TftpClient:
                 raw, source = sock.recvfrom(MAX_DATAGRAM)
             except TimeoutError:
                 return None
+            except (ConnectionRefusedError, ConnectionResetError) as exc:
+                # Windows reports ICMP "UDP port unreachable" as WinError 10054;
+                # Unix can report ECONNREFUSED. This is an unavailable peer, not
+                # a local staging-file error. Keep the DNS fallback path working.
+                endpoint = format_endpoint(self._state.target[0], self._state.target[1])
+                raise tftp_errors.TftpTimeout(
+                    f"TFTP tại {endpoint} không sẵn sàng hoặc đã ngắt kết nối"
+                ) from exc
             if tid is None:
                 if not same_ip(source, self._state.target):
                     self.metrics.incr("packets.foreign_host")

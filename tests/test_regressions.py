@@ -42,6 +42,19 @@ def _udp(timeout: float = 3.0) -> socket.socket:
     return sock
 
 
+class TestUnavailableTftpPeer(unittest.TestCase):
+    def test_udp_rejection_is_a_peer_timeout_not_a_local_file_error(self):
+        client = TftpClient("127.0.0.1", 6969)
+        for error in (ConnectionResetError(10054), ConnectionRefusedError(errno.ECONNREFUSED)):
+            with self.subTest(error=type(error).__name__):
+                sock = mock.Mock()
+                sock.recvfrom.side_effect = error
+                with self.assertRaises(tftp_errors.TftpTimeout) as raised:
+                    client._recv_valid(sock, (tftp_packet.OP_ACK,))
+                self.assertIn("127.0.0.1:6969", str(raised.exception))
+                self.assertIs(raised.exception.__cause__, error)
+
+
 class TestPacketEdges(unittest.TestCase):
     def test_option_value_too_long_is_format_error(self):
         raw = b"\x00\x01a\x00octet\x00blksize\x00" + b"1" * 5000 + b"\x00"

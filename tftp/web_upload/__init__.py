@@ -10,13 +10,15 @@ import secrets
 import sqlite3
 import tempfile
 import threading
+import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, g, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
-from .. import enable_utf8_console
+from .. import enable_utf8_console, tftp_errors
 from ..tftp_client import TftpClient
 from ..tftp_errors import TftpError
 from ..tftp_net import format_endpoint, parse_host_port
@@ -59,27 +61,74 @@ def validate_bind_host(value: str) -> str:
         raise UploadConfigError("Host phải là IP private hoặc loopback cụ thể.") from exc
 
 
+def trusted_host_key(value: str) -> str | None:
+    """Chuẩn hoá Host header thành khoá so sánh, xử lý đúng IPv6.
+
+    Flask 3.1 dùng ``werkzeug.sansio.utils.host_is_trusted``, hàm này cắt host
+    tại dấu ``:`` đầu tiên nên ``[::1]:8080`` bị hiểu thành ``[``. Vì portal
+    hỗ trợ bind IPv6, tự chuẩn hoá bằng ``urlsplit``/``ipaddress`` an toàn hơn.
+    Trả ``None`` nếu giá trị không phải hostname/IP hợp lệ.
+    """
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    value = value.rstrip(".").lower()
+    if not value or any(char in value for char in "/\\@ \t\r\n"):
+        return None
+    try:
+        address = ipaddress.ip_address(value)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return str(address)
+    except ValueError:
+        pass
+    try:
+        value = value.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    if re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?", value) is None:
+        return None
+    return value
+
+
 def create_app(config: dict | None = None, *, allowed_networks: list[str] | None = None,
                tftp_host: str | None = None, tftp_port: int | None = None,
                max_file_size: int | None = None,
-               max_concurrent_uploads: int | None = None) -> Flask:
+               max_concurrent_uploads: int | None = None,
+               allowed_hosts: list[str] | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static",
                 static_url_path="/web_static")
     app.config.from_mapping(
         FILE_ROOT="files", DATA_DIR="web-data", TFTP_HOST="127.0.0.1", TFTP_PORT=6969,
         TFTP_TIMEOUT=2, TFTP_RETRIES=3, MAX_FILE_SIZE=100 * 1024 * 1024,
         ALLOWED_NETWORKS=["127.0.0.0/8", "::1/128"], COOKIE_SECURE=False,
-        MAX_CONCURRENT_UPLOADS=4,
+        MAX_CONCURRENT_UPLOADS=4, ALLOWED_HOSTS=["localhost", "127.0.0.1", "::1"],
+        HEALTH_CACHE_SECONDS=5.0, HEALTH_TIMEOUT=1.0,
     )
     app.config.update(config or {})
     overrides = dict(ALLOWED_NETWORKS=allowed_networks, TFTP_HOST=tftp_host,
                      TFTP_PORT=tftp_port, MAX_FILE_SIZE=max_file_size,
-                     MAX_CONCURRENT_UPLOADS=max_concurrent_uploads)
+                     MAX_CONCURRENT_UPLOADS=max_concurrent_uploads,
+                     ALLOWED_HOSTS=allowed_hosts)
     app.config.update({key: value for key, value in overrides.items() if value is not None})
     if not app.config["TFTP_HOST"].strip() or not 1 <= app.config["TFTP_PORT"] <= 65535:
         raise UploadConfigError("Địa chỉ hoặc cổng TFTP không hợp lệ.")
     if app.config["MAX_CONCURRENT_UPLOADS"] < 1:
         raise UploadConfigError("Số lượt truyền đồng thời phải lớn hơn 0.")
+    if app.config["ALLOWED_HOSTS"] is not None:
+        if isinstance(app.config["ALLOWED_HOSTS"], str):
+            raise UploadConfigError("ALLOWED_HOSTS phải là danh sách host.")
+        configured_hosts = []
+        for value in app.config["ALLOWED_HOSTS"]:
+            key = trusted_host_key(str(value))
+            if key is None:
+                raise UploadConfigError(f"Host được phép không hợp lệ: {value!r}")
+            configured_hosts.append(key)
+        if not configured_hosts:
+            raise UploadConfigError("Cần ít nhất một host được phép.")
+        app.config["ALLOWED_HOSTS"] = set(configured_hosts)
+    if app.config["HEALTH_CACHE_SECONDS"] < 0 or app.config["HEALTH_TIMEOUT"] <= 0:
+        raise UploadConfigError("Cấu hình health check không hợp lệ.")
     root = Path(app.config["FILE_ROOT"]).resolve()
     data = Path(app.config["DATA_DIR"]).resolve()
     if data == root or root in data.parents:
@@ -110,6 +159,18 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
 
     @app.before_request
     def protect():
+        allowed_hosts = app.config["ALLOWED_HOSTS"]
+        if allowed_hosts is not None:
+            raw_host = request.host
+            hostname = None
+            if raw_host and not any(char in raw_host for char in "/\\@ \t\r\n"):
+                try:
+                    hostname = urlsplit(f"//{raw_host}").hostname
+                except ValueError:
+                    pass
+            if trusted_host_key(hostname or "") not in allowed_hosts:
+                LOG.warning("từ chối Host %r từ %s", raw_host, request.remote_addr)
+                return fail("Địa chỉ máy chủ không được phép.", 400)
         if request.path not in {"/api/files", "/api/upload"}:
             request.max_content_length = 16 * 1024
         try:
@@ -167,9 +228,56 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     def index():
         return render_template("portal.html")
 
+    health_lock = threading.Lock()
+    health_cache: dict[str, tuple[float, dict[str, object], int] | None] = {"entry": None}
+
+    def health_report() -> tuple[dict[str, object], int]:
+        checks: dict[str, str] = {}
+        healthy = True
+        try:
+            store.ping()
+        except sqlite3.Error as exc:
+            LOG.warning("Health check: database lỗi: %s", exc)
+            checks["database"] = "error"
+            healthy = False
+        else:
+            checks["database"] = "ok"
+
+        # RRQ một tên chắc chắn không tồn tại: server trả ERROR 1/2 cũng chứng
+        # minh TFTP còn sống, mà không đọc file thật. Tên bắt đầu bằng "." bị
+        # server coi là file ẩn nên không bao giờ trùng file người dùng.
+        probe_name = f".health-{secrets.token_hex(6)}"
+        try:
+            with tempfile.TemporaryDirectory(dir=temporary_root) as temp:
+                probe = TftpClient(
+                    app.config["TFTP_HOST"], app.config["TFTP_PORT"],
+                    timeout=app.config["HEALTH_TIMEOUT"], retries=1,
+                    total_timeout=app.config["HEALTH_TIMEOUT"] * 2,
+                )
+                probe.download(probe_name, str(Path(temp) / "probe"))
+        except tftp_errors.TftpRemoteError:
+            checks["tftp"] = "ok"
+        except (tftp_errors.TftpError, OSError) as exc:
+            LOG.warning("Health check: TFTP không phản hồi: %s", exc)
+            checks["tftp"] = "unreachable"
+            healthy = False
+        else:
+            checks["tftp"] = "ok"
+
+        return {"status": "ok" if healthy else "degraded", "checks": checks}, (
+            200 if healthy else 503
+        )
+
     @app.get("/healthz")
     def health():
-        return jsonify(status="ok")
+        now = time.monotonic()
+        with health_lock:
+            entry = health_cache["entry"]
+            if entry is not None and now - entry[0] < app.config["HEALTH_CACHE_SECONDS"]:
+                return jsonify(entry[1]), entry[2]
+            body, status = health_report()
+            health_cache["entry"] = (now, body, status)
+            return jsonify(body), status
 
     def session_response(user_id=None):
         token, csrf = store.new_session(g.token, user_id)
@@ -343,8 +451,6 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         except ValueError:
             return fail("File vượt quá dung lượng cho phép.", 413)
         except TftpError as exc:
-            from .. import tftp_errors
-
             status = 504 if isinstance(exc, tftp_errors.TftpTimeout) else {
                 tftp_errors.ERR_ACCESS_VIOLATION: 403,
                 tftp_errors.ERR_DISK_FULL: 507,
@@ -400,6 +506,8 @@ def main(argv=None) -> int:
     parser.add_argument("--tftp-server", default="127.0.0.1:6969")
     parser.add_argument("--max-file-size", type=int, default=100, help="MiB mỗi file")
     parser.add_argument("--secure-cookie", action="store_true", help="Chỉ bật sau HTTPS proxy")
+    parser.add_argument("--trusted-host", action="append", default=[], metavar="HOST",
+                        help="Host header được phép thêm (tên miền nội bộ); lặp lại được")
     parser.add_argument("--max-concurrent-uploads", type=int, default=4)
     parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args(argv)
@@ -412,10 +520,12 @@ def main(argv=None) -> int:
             raise ValueError("Số worker phải lớn hơn 0.")
         networks = args.allowed_network or ([f"{host}/{host.max_prefixlen}"] if host.is_loopback
                                             else [])
+        allowed_hosts = [str(host), "localhost", "127.0.0.1", "::1", *args.trusted_host]
         app = create_app(dict(FILE_ROOT=args.root, DATA_DIR=args.data_dir,
                               ALLOWED_NETWORKS=networks, TFTP_HOST=tftp_host,
                               TFTP_PORT=int(tftp_port), MAX_FILE_SIZE=args.max_file_size * 1024**2,
                               MAX_CONCURRENT_UPLOADS=args.max_concurrent_uploads,
+                              ALLOWED_HOSTS=allowed_hosts,
                               COOKIE_SECURE=args.secure_cookie))
     except ValueError as exc:
         parser.error(str(exc))

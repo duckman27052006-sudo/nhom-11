@@ -180,7 +180,9 @@ class TestGuiSmoke(unittest.TestCase):
                 self.assertEqual(self.window.server.bound_port, port)
                 self.assertEqual(self.window.host_edit.text(), "127.0.0.1")
                 web = create_app({"FILE_ROOT": root, "DATA_DIR": Path(directory) / "web-data",
-                                  "TFTP_PORT": port, "TESTING": True})
+                                  "TFTP_PORT": port, "TESTING": True,
+                                  "ALLOWED_HOSTS": ["upload.lan", "localhost",
+                                                    "127.0.0.1", "::1"]})
                 client, csrf = authenticated_client(web)
                 import io
 

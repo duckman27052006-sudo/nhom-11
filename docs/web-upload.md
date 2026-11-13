@@ -64,7 +64,13 @@ proxy làm peer chung nếu muốn giữ ACL cho từng client.
 | `--max-file-size` | `100` | MiB tối đa mỗi file, cả tải và gửi |
 | `--secure-cookie` | tắt | Chỉ dùng nếu phục vụ web qua HTTPS |
 | `--max-concurrent-uploads` | `4` | Tổng lượt tải/gửi đồng thời |
+| `--trusted-host` | địa chỉ bind + localhost | Host header được phép thêm (tên miền nội bộ); lặp lại được |
 | `--threads` | `8` | Số worker Waitress |
+
+Host header được kiểm tra theo allowlist để chặn DNS rebinding: mặc định chỉ
+chấp nhận địa chỉ bind, `localhost`, `127.0.0.1` và `::1`. Nếu người dùng mở
+portal bằng tên miền nội bộ (ví dụ `http://upload.lan:8080`), thêm
+`--trusted-host upload.lan`; không cần thêm khi truy cập bằng IP LAN.
 
 Chạy hai tiến trình cùng máy với cùng root. TFTP không hỗ trợ liệt kê file, nên
 gateway đọc danh sách từ thư mục root. Nếu đổi root ở một bên phải đổi bên còn lại.
@@ -128,6 +134,14 @@ các chức năng này dùng SQLite/thư mục trên máy, còn upload/download 
 
 Windows có thể báo `WinError 10054` khi không có dịch vụ ở cổng UDP đích. Web
 hiển thị HTTP 504 kèm địa chỉ/cổng và hướng dẫn khởi động, thay cho lỗi gửi file chung.
+
+### Health check
+
+`GET /healthz` kiểm tra cả SQLite (một truy vấn `SELECT 1`) lẫn TFTP (gửi RRQ
+một tên chắc chắn không tồn tại, coi ERROR trả về là server còn sống). Kết quả
+`200` khi cả hai OK, `503` kèm `{"status":"degraded","checks":{...}}` khi một
+thành phần lỗi. Kết quả được cache 5 giây để monitoring không tạo phiên TFTP
+liên tục; đổi bằng `HEALTH_CACHE_SECONDS` khi dùng `create_app`.
 
 ### Dịch vụ và kiểm thử
 

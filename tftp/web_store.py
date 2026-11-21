@@ -56,6 +56,11 @@ class Store:
     def digest(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
+    def ping(self) -> None:
+        """Health check: mở DB và chạy một truy vấn tối thiểu."""
+        with self.connect() as db:
+            db.execute("SELECT 1").fetchone()
+
     def session(self, token: str):
         if not token or len(token) > 128:
             return None

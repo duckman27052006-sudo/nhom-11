@@ -44,6 +44,9 @@ python -m pip install -e ".[gui]"     # hoặc: python -m pip install PySide6
 python -m tftp.tftp_gui
 ```
 
+Trên Windows, `tftp.bat` tự khởi động TFTP loopback cho web. Nếu mở GUI thủ công,
+bấm **Khởi động server** trước khi upload hoặc dùng `python -m tftp.tftp_gui --start-server`.
+
 Bố cục chia **4 trang** để không dồn hết chức năng vào một màn hình:
 
 | Trang | Nội dung |
@@ -278,8 +281,10 @@ nguồn **GitHub Actions** để workflow `.github/workflows/pages.yml` triển 
 thư mục `site/`.
 
 Bind address chỉ nhận một IP private cụ thể (không nhận wildcard/public IP);
-gateway kiểm tra subnet client, giới hạn kích thước HTTP, kiểm tra Origin và
-CSRF và phiên tài khoản; danh sách, tải/gửi file và chat đều yêu cầu đăng nhập.
+gateway kiểm tra subnet client, Host header (chống DNS rebinding), giới hạn
+kích thước HTTP, kiểm tra Origin và CSRF và phiên tài khoản; danh sách, tải/gửi
+file và chat đều yêu cầu đăng nhập. Truy cập bằng tên miền nội bộ thì thêm
+`--trusted-host ten-mien`; `GET /healthz` trả 200/503 kèm trạng thái SQLite và TFTP.
 TFTP server thấy IP của gateway; web log ghi IP trình duyệt. HTTP nội bộ không mã hóa TLS,
 TFTP cũng không mã hóa: không chuyển tiếp cổng từ Internet. Cấu hình đầy đủ:
 `docs/web-upload.md`.

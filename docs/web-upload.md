@@ -1,8 +1,9 @@
 # Cổng file và chat TFTP trong LAN
 
-Cổng web cung cấp đăng ký/đăng nhập/đăng xuất, danh sách file, gửi/tải file và
-phòng chat chung. Mọi thao tác file/chat yêu cầu đăng nhập. Đăng ký thành công
-tự đăng nhập. Máy chủ giữ tài khoản và tin nhắn qua các lần khởi động.
+Cổng web cung cấp đăng ký/đăng nhập/đăng xuất, danh sách file, gửi/tải file,
+phòng chat chung và bảng điều khiển quản trị. Mọi thao tác file/chat yêu cầu đăng
+nhập. Đăng ký thành công tự đăng nhập. Máy chủ giữ tài khoản, vai trò, lịch sử
+kiểm duyệt và tin nhắn qua các lần khởi động.
 
 ## Cài đặt và chạy
 
@@ -46,10 +47,11 @@ Defender Firewall cho subnet LAN đã chọn, không tự mở firewall cho mọ
 Thiết bị không cần cài TFTP client. Khi gateway và TFTP dùng loopback, không cần
 mở UDP ra LAN. Guest Wi-Fi/client isolation có thể ngăn thiết bị kết nối nhau.
 
-`--host` phải là IP private/loopback cụ thể, không dùng `0.0.0.0` hoặc địa chỉ public.
-Bind LAN bắt buộc có `--allowed-network`; có thể lặp lại cờ cho nhiều subnet.
-ACL dùng địa chỉ kết nối thực, bỏ qua `X-Forwarded-For`. Không cấu hình reverse
-proxy làm peer chung nếu muốn giữ ACL cho từng client.
+`--host` phải là IP private/loopback (hoặc CGNAT `100.64.0.0/10` cho Tailscale) cụ
+thể, không dùng `0.0.0.0` hoặc địa chỉ public. Bind LAN bắt buộc có
+`--allowed-network`; có thể lặp lại cờ cho nhiều subnet. ACL dùng địa chỉ kết nối
+thật; chỉ khi peer nằm trong `--trusted-proxy` gateway mới đọc
+`X-Forwarded-For/Proto/Host` (xem mục nhiều trụ sở).
 
 ## Cấu hình
 
@@ -58,6 +60,7 @@ proxy làm peer chung nếu muốn giữ ACL cho từng client.
 | `--host` | `127.0.0.1` | IP web cụ thể |
 | `--port` | `8080` | TCP port web |
 | `--allowed-network` | loopback khi bind loopback | Subnet được phép truy cập |
+| `--trusted-proxy` | không đặt | CIDR của reverse proxy được đọc `X-Forwarded-*`; lặp lại được |
 | `--root` | `files` | Cùng thư mục root với TFTP server |
 | `--tftp-server` | `127.0.0.1:6969` | IPv4, hostname hoặc `[IPv6]:port` TFTP |
 | `--data-dir` | `web-data` | Dữ liệu tài khoản/phiên/chat, nằm ngoài root TFTP |
@@ -66,6 +69,7 @@ proxy làm peer chung nếu muốn giữ ACL cho từng client.
 | `--max-concurrent-uploads` | `4` | Tổng lượt tải/gửi đồng thời |
 | `--trusted-host` | địa chỉ bind + localhost | Host header được phép thêm (tên miền nội bộ); lặp lại được |
 | `--threads` | `8` | Số worker Waitress |
+| `--admin` | không đặt | Cấp quyền quản trị cho tài khoản đã có trong data-dir |
 
 Host header được kiểm tra theo allowlist để chặn DNS rebinding: mặc định chỉ
 chấp nhận địa chỉ bind, `localhost`, `127.0.0.1` và `::1`. Nếu người dùng mở
@@ -83,12 +87,63 @@ cho phép subnet tương ứng và dùng `--tftp-server "[::1]:6969"` khi TFTP c
 - Tên tài khoản 3–32 ký tự: chữ ASCII, số, dấu `_`; tên trùng không phân biệt hoa thường.
 - Mật khẩu 8–128 ký tự, lưu hash có salt. Phiên 12 giờ, cookie HttpOnly và
   SameSite=Lax; đăng xuất hủy phiên phía server. Có CSRF và giới hạn đăng nhập/đăng ký.
-- Một phòng chat chung, không có tin nhắn riêng hoặc vai trò quản trị. Tin 1–2.000
-  ký tự, tối đa 30 tin/phút mỗi tài khoản. Nội dung hiển thị như văn bản thuần.
+- Một phòng chat chung, không có tin nhắn riêng. Tin 1–2.000 ký tự, tối đa 30
+  tin/phút mỗi tài khoản. Nội dung hiển thị như văn bản thuần.
 - Mở phòng tải 50 tin mới nhất; cập nhật mỗi 2 giây. Thời gian theo thiết bị người xem.
 - Sao lưu `web-data/portal.sqlite3` bằng SQLite backup khi đang chạy hoặc sao chép
   cả thư mục dữ liệu sau khi dừng gateway. Giữ thư mục này riêng tư và không commit.
-- Không có chức năng khôi phục mật khẩu, duyệt tài khoản hay xóa tin trong phiên bản này.
+- Không có chức năng khôi phục mật khẩu hay duyệt tài khoản trước khi vào cổng.
+
+## Vai trò và kiểm duyệt
+
+Tài khoản đầu tiên tạo trong một data-dir trống tự nhận vai trò `admin`. Với
+data-dir đã có tài khoản từ bản cũ, tài khoản sớm nhất được nâng lên `admin` khi
+mở cổng lần đầu để luôn có người quản trị. Muốn cấp quyền cho tài khoản khác đã
+đăng ký, chạy gateway kèm `--admin <tên_tài_khoản>`; lệnh này idempotent và chỉ
+đổi vai trò, không đổi mật khẩu hay phiên hiện có.
+
+Mọi thành viên đã đăng nhập có thể đọc và gửi tin trong phòng chat chung, xem và
+tải file. Quản trị viên có thêm bảng điều khiển "Quản trị" với các quyền sau:
+
+| Thao tác | Hiệu lực |
+|---|---|
+| Khóa / mở khóa tài khoản | Chặn đăng nhập; thu hồi mọi phiên đang mở ngay lập tức. Có thể chọn 1 giờ, 24 giờ, 7 ngày hoặc vĩnh viễn kèm lý do. |
+| Hạn chế / bỏ hạn chế chat | Tài khoản vẫn đọc được phòng chat nhưng không gửi được tin mới; hết hạn tự mở. |
+| Cấp / hạ quyền quản trị | Chỉ đổi vai trò; không thể tự đổi vai trò của mình hoặc hạ quyền quản trị viên cuối cùng. |
+| Xóa một tin nhắn | Quản trị viên xóa được mọi tin; mỗi thành viên cũng xóa được tin của chính mình. |
+| Xóa lịch sử chat | Xóa toàn bộ phòng chat hoặc toàn bộ tin của một tài khoản. Không thể hoàn tác. |
+
+Các quy tắc an toàn: quản trị viên phải được hạ quyền trước khi bị khóa hoặc hạn
+chế chat; không thể tự khóa, tự hạn chế hay tự đổi vai trò; tài khoản đang bị khóa
+hoặc hạn chế chat không được cấp quyền quản trị cho tới khi gỡ hạn chế. Mọi thao
+tác kiểm duyệt được ghi vào bảng `moderation` và hiển thị trong nhật ký 24 mục gần
+nhất. Xóa tin nhắn làm tăng mốc `chat_epoch`, vì vậy các trình duyệt đang mở tự tải
+lại danh sách thay vì giữ bản sao cũ. Khóa tài khoản không xóa file đã tải lên.
+
+## Nhiều trụ sở
+
+Công ty có hai văn phòng nên chạy **một** gateway trung tâm và nối hai LAN bằng VPN
+site-to-site; cả hai dùng chung `web-data/portal.sqlite3`. Không chạy hai gateway
+với hai DB riêng vì phòng chat sẽ tách làm hai.
+
+- Bind web vào IP private của máy chủ trong VPN/LAN, ví dụ `--host 192.168.10.50`.
+- Thêm cả hai subnet: `--allowed-network 192.168.10.0/24 --allowed-network 192.168.20.0/24`.
+- Không NAT lưu lượng chi nhánh để ACL thấy IP nguồn thật; NAT sẽ biến mọi client
+  thành IP tunnel và mất khả năng phân biệt trụ sở.
+- TFTP vẫn `127.0.0.1:6969` cạnh gateway; client chỉ đi HTTP qua VPN, file do
+  gateway chuyển vào TFTP nội bộ.
+- Dùng DNS nội bộ (`chat.congty.local`) thay vì IP.
+- Bộ Docker Compose + WireGuard mẫu: [deploy/README.md](../deploy/README.md).
+
+Nếu đặt reverse proxy TLS (Caddy/nginx) trước gateway, khai báo IP proxy bằng
+`--trusted-proxy` (lặp lại được) và bật `--secure-cookie`. Gateway chỉ đọc
+`X-Forwarded-For/Proto/Host` khi IP kết nối thật thuộc `--trusted-proxy`; địa chỉ
+client lấy từ phần tử không tin cậy bên phải nhất của `X-Forwarded-For`. Proxy phải
+ghi đè/append header này. Không khai báo `0.0.0.0/0`.
+
+`--host` và `--allowed-network` chấp nhận dải CGNAT `100.64.0.0/10` để dùng trực
+tiếp IP Tailscale. Nếu dùng Tailscale subnet router, client vẫn giữ IP LAN thật và
+không cần dải này.
 
 ## File và giới hạn
 

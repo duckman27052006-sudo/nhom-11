@@ -1,0 +1,20 @@
+# WireGuard tại router/VM của chi nhánh.
+# Copy thành /etc/wireguard/wg0.conf trên router Linux (OpenWrt, Debian, ...).
+# Đổi br0 thành interface LAN thật (br-lan, eth1, ...).
+
+[Interface]
+Address = 10.8.0.2/24
+ListenPort = 51820
+PrivateKey = <BRANCH_PRIVATE_KEY>
+
+PostUp = sysctl -w net.ipv4.ip_forward=1
+PostUp = iptables -A FORWARD -i br0 -o %i -j ACCEPT
+PostUp = iptables -A FORWARD -i %i -o br0 -j ACCEPT
+PostDown = iptables -D FORWARD -i br0 -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -o br0 -j ACCEPT
+
+[Peer]
+PublicKey = <HQ_PUBLIC_KEY>
+Endpoint = <HQ_PUBLIC_IP>:51820
+AllowedIPs = 10.8.0.0/24, 192.168.10.0/24
+PersistentKeepalive = 25

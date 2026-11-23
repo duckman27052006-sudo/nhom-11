@@ -1,0 +1,39 @@
+name: tftp-chat
+
+# Cả hai service dùng host network để web gateway nhìn thấy IP thật của client
+# (ACL --allowed-network) và TFTP chỉ nghe trên loopback của host.
+x-common: &common
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  image: tftp-chat:local
+  restart: unless-stopped
+  init: true
+  network_mode: host
+  env_file:
+    - .env
+  volumes:
+    - ${HOST_FILES_DIR:-./data/files}:/srv/tftp/files
+
+services:
+  tftp:
+    <<: *common
+    command:
+      - python
+      - -m
+      - tftp.tftp_server
+      - --host
+      - 127.0.0.1
+      - --port
+      - "6969"
+      - --root
+      - /srv/tftp/files
+
+  web:
+    <<: *common
+    depends_on:
+      - tftp
+    command: ["python", "deploy/run_web.py"]
+    volumes:
+      - ${HOST_FILES_DIR:-./data/files}:/srv/tftp/files
+      - ${HOST_DATA_DIR:-./data/web-data}:/srv/tftp/web-data

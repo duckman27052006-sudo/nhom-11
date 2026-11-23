@@ -3,85 +3,480 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#17211f">
-  <title>TFTP Drop · File & trò chuyện trong LAN</title>
+  <meta name="theme-color" content="#2aa8ef">
+  <meta name="color-scheme" content="light">
+  <title>TFTP DROP · Khoảng trời xanh cho tệp và trò chuyện LAN</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
   <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="TFTP Drop, trang chủ"><span class="mark" aria-hidden="true">▥</span> TFTP <span>DROP</span></a>
-    <span class="network"><i aria-hidden="true"></i> MẠNG NỘI BỘ</span>
-    <div id="account" hidden><span id="username"></span><button id="logout" class="quiet" type="button">Đăng xuất ↗</button></div>
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="g-leaf" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#d8ffb0"/><stop offset=".45" stop-color="#88d317"/><stop offset="1" stop-color="#2f9d3a"/>
+      </linearGradient>
+      <linearGradient id="g-aqua" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#d6fbff"/><stop offset=".5" stop-color="#4facfe"/><stop offset="1" stop-color="#0076c8"/>
+      </linearGradient>
+      <linearGradient id="g-cyan" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff"/><stop offset=".55" stop-color="#7ef9ff"/><stop offset="1" stop-color="#00a6d6"/>
+      </linearGradient>
+      <linearGradient id="g-gold" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#fff5c2"/><stop offset=".5" stop-color="#ffd24a"/><stop offset="1" stop-color="#d99a00"/>
+      </linearGradient>
+      <linearGradient id="g-coral" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffe2df"/><stop offset=".5" stop-color="#ff7a6b"/><stop offset="1" stop-color="#c9302c"/>
+      </linearGradient>
+      <linearGradient id="g-ink" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5d8ba3"/><stop offset="1" stop-color="#0b3446"/>
+      </linearGradient>
+
+      <symbol id="i-drop" viewBox="0 0 24 24">
+        <path d="M12 2.4c3.2 4.6 6.3 8.3 6.3 12.2A6.3 6.3 0 0 1 5.7 14.6C5.7 10.7 8.8 7 12 2.4Z" fill="url(#g-aqua)"/>
+        <path d="M9 14.4c.2-2 1.4-3.9 2.7-5.6.4 2.5.2 4.4-.7 6.1-.7 1.3-2.2 1.1-2-.5Z" fill="#ffffff" opacity=".72"/>
+        <ellipse cx="9.4" cy="16.2" rx="1.5" ry="2.1" fill="#ffffff" opacity=".45" transform="rotate(-22 9.4 16.2)"/>
+      </symbol>
+      <symbol id="i-doc" viewBox="0 0 24 24">
+        <path d="M5.8 2.6h7.6L19 8.2v12.8a.8.8 0 0 1-.8.8H5.8a.8.8 0 0 1-.8-.8V3.4a.8.8 0 0 1 .8-.8Z" fill="url(#g-aqua)"/>
+        <path d="M13.4 2.6v5.6H19Z" fill="#e4fbff" opacity=".85"/>
+        <path d="M8.6 12h7M8.6 15.2h7M8.6 18.4h4.4" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" opacity=".85"/>
+        <ellipse cx="8.4" cy="6" rx="1.2" ry="2.2" fill="#ffffff" opacity=".35" transform="rotate(-18 8.4 6)"/>
+      </symbol>
+      <symbol id="i-files" viewBox="0 0 24 24">
+        <path d="M3.4 6.6A2.2 2.2 0 0 1 5.6 4.4h4l2 2.1h6.8a2.2 2.2 0 0 1 2.2 2.2v8.7a2.2 2.2 0 0 1-2.2 2.2H5.6a2.2 2.2 0 0 1-2.2-2.2Z" fill="url(#g-gold)"/>
+        <path d="M3.4 9.2h17.2v8.2a2.2 2.2 0 0 1-2.2 2.2H5.6a2.2 2.2 0 0 1-2.2-2.2Z" fill="url(#g-aqua)"/>
+        <path d="M5 10.2h14c.4 0 .6.4.4.7l-1.2 2.1c-.1.2-.3.3-.5.3H5.6c-.6 0-1-.6-.7-1.1l.3-.5c.1-.9.1-1.5.8-1.5Z" fill="#ffffff" opacity=".55"/>
+      </symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24">
+        <path d="M4 6.3A3.3 3.3 0 0 1 7.3 3h9.4A3.3 3.3 0 0 1 20 6.3v6.2a3.3 3.3 0 0 1-3.3 3.3H10l-4.6 3.5c-.6.5-1.4 0-1.4-.7Z" fill="url(#g-cyan)"/>
+        <path d="M6 6h12c.4 0 .6.3.5.7l-.5 1.7c-.1.3-.4.5-.7.5H6.4c-.5 0-.8-.5-.6-1l.3-.7c.2-.7.3-1.2.9-1.2Z" fill="#ffffff" opacity=".7"/>
+        <circle cx="9" cy="12" r="1.2" fill="#0b5e86"/><circle cx="12.6" cy="12" r="1.2" fill="#0b5e86"/><circle cx="16.2" cy="12" r="1.2" fill="#0b5e86"/>
+      </symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24">
+        <path d="M12 2.2 19.6 5v6.2c0 4.5-3.1 8.4-7.6 10.3-4.5-1.9-7.6-5.8-7.6-10.3V5Z" fill="url(#g-leaf)"/>
+        <path d="m12 5.3 4.9 1.8v4.1c0 3.2-2 6-4.9 7.5-2.9-1.5-4.9-4.3-4.9-7.5V7.1Z" fill="#ffffff" opacity=".28"/>
+        <path d="m8.9 12.1 2.1 2.1 4.2-4.3" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24">
+        <path d="M12 3.2 18.4 10h-4v5.2h-4.8V10h-4Z" fill="url(#g-cyan)"/>
+        <path d="M4.6 15.2a2.2 2.2 0 0 1 2.2-2.2h1.2a2.2 2.2 0 0 0 0 4.4h8a2.2 2.2 0 0 0 0-4.4h1.2a2.2 2.2 0 0 1 0 4.4h-1.2v3.4H7.8v-3.4H6.8a2.2 2.2 0 0 1-2.2-2.2Z" fill="url(#g-aqua)"/>
+        <ellipse cx="9.4" cy="6.6" rx="1.2" ry="2" fill="#ffffff" opacity=".55" transform="rotate(-28 9.4 6.6)"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 20.6 5.6 14h4V8.6h4.8V14h4Z" fill="url(#g-leaf)"/>
+        <path d="M4.8 3.4h14.4a1.8 1.8 0 0 1 0 3.6H4.8a1.8 1.8 0 0 1 0-3.6Z" fill="url(#g-aqua)"/>
+        <ellipse cx="8.6" cy="5.2" rx="1.2" ry="1" fill="#ffffff" opacity=".6"/>
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="10.6" cy="10.6" r="6.4" fill="none" stroke="url(#g-aqua)" stroke-width="2.4"/>
+        <path d="m15.6 15.6 5 5" fill="none" stroke="url(#g-ink)" stroke-width="2.6" stroke-linecap="round"/>
+        <circle cx="8.6" cy="8.4" r="1.7" fill="#ffffff" opacity=".65"/>
+      </symbol>
+      <symbol id="i-users" viewBox="0 0 24 24">
+        <circle cx="9" cy="8" r="3.4" fill="url(#g-aqua)"/>
+        <path d="M2.8 19.4c0-3.4 2.8-5.6 6.2-5.6s6.2 2.2 6.2 5.6c0 .8-.6 1.4-1.4 1.4H4.2c-.8 0-1.4-.6-1.4-1.4Z" fill="url(#g-cyan)"/>
+        <circle cx="17.2" cy="9.2" r="2.7" fill="url(#g-leaf)"/>
+        <path d="M14.8 14.6c3.6-.9 6.6 1.2 6.6 4.4 0 .6-.5 1.1-1.1 1.1h-4.1c.1-.4.2-.9.2-1.4 0-1.6-.6-3-1.6-4.1Z" fill="url(#g-leaf)" opacity=".85"/>
+      </symbol>
+      <symbol id="i-ban" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.4" fill="url(#g-coral)"/>
+        <circle cx="12" cy="12" r="5.6" fill="none" stroke="#ffffff" stroke-width="1.4" opacity=".75"/>
+        <path d="M6.4 17.6 17.6 6.4" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/>
+        <ellipse cx="8.6" cy="8.2" rx="2.2" ry="1.4" fill="#ffffff" opacity=".45" transform="rotate(-28 8.6 8.2)"/>
+      </symbol>
+      <symbol id="i-unlock" viewBox="0 0 24 24">
+        <rect x="5.2" y="10.4" width="13.6" height="10.4" rx="2.4" fill="url(#g-leaf)"/>
+        <path d="M8.6 10.4V8a3.4 3.4 0 0 1 6.5-1.4" fill="none" stroke="url(#g-aqua)" stroke-width="2.2" stroke-linecap="round"/>
+        <circle cx="12" cy="15.2" r="1.6" fill="#ffffff"/>
+        <rect x="11.2" y="15.4" width="1.6" height="2.6" rx=".8" fill="#ffffff"/>
+      </symbol>
+      <symbol id="i-mute" viewBox="0 0 24 24">
+        <path d="M4 9.2h3.6L12 5.4c.6-.5 1.6-.1 1.6.7v11.8c0 .8-1 1.2-1.6.7L7.6 14.8H4a1.6 1.6 0 0 1-1.6-1.6v-2.4A1.6 1.6 0 0 1 4 9.2Z" fill="url(#g-aqua)"/>
+        <path d="m16.4 9.4 4.6 5.2M21 9.4l-4.6 5.2" stroke="url(#g-coral)" stroke-width="2.2" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-voice" viewBox="0 0 24 24">
+        <path d="M4 9.2h3.6L12 5.4c.6-.5 1.6-.1 1.6.7v11.8c0 .8-1 1.2-1.6.7L7.6 14.8H4a1.6 1.6 0 0 1-1.6-1.6v-2.4A1.6 1.6 0 0 1 4 9.2Z" fill="url(#g-aqua)"/>
+        <path d="M16.2 8.6a5 5 0 0 1 0 6.8M18.8 6.2a8.2 8.2 0 0 1 0 11.6" fill="none" stroke="url(#g-leaf)" stroke-width="2" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-crown" viewBox="0 0 24 24">
+        <path d="m3.4 8.2 4.4 3.1 4.2-5.6 4.2 5.6 4.4-3.1-1.6 8.8H5Z" fill="url(#g-gold)"/>
+        <rect x="5" y="18" width="14" height="2.6" rx="1.3" fill="url(#g-gold)"/>
+        <circle cx="8" cy="11.4" r="1.1" fill="#ffffff" opacity=".8"/>
+        <circle cx="12" cy="9.6" r="1.1" fill="#ffffff" opacity=".8"/>
+        <circle cx="16" cy="11.4" r="1.1" fill="#ffffff" opacity=".8"/>
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M5.2 6.8h13.6l-1.3 13.1a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8Z" fill="url(#g-coral)"/>
+        <rect x="3.6" y="3.8" width="16.8" height="3.2" rx="1.6" fill="url(#g-aqua)"/>
+        <path d="M9.8 3.8V2.6h4.4v1.2" fill="url(#g-aqua)"/>
+        <path d="M9.6 10.2v7.6M14.4 10.2v7.6" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" opacity=".75"/>
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.6" fill="url(#g-cyan)"/>
+        <circle cx="12" cy="12" r="6.1" fill="#ffffff" opacity=".65"/>
+        <path d="M12 7.8V12l3 1.8" fill="none" stroke="#0b5e86" stroke-width="1.9" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24">
+        <path d="M12 2.2 14 9l6.8 2-6.8 2-2 6.8-2-6.8L3.2 11 10 9Z" fill="url(#g-cyan)"/>
+        <path d="M19 3.4l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7Z" fill="url(#g-leaf)"/>
+        <circle cx="5.6" cy="18.4" r="1.6" fill="url(#g-gold)"/>
+      </symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24">
+        <path d="M10.6 3.6a1.6 1.6 0 0 1 2.8 0l8 14a1.6 1.6 0 0 1-1.4 2.4H4a1.6 1.6 0 0 1-1.4-2.4Z" fill="url(#g-gold)"/>
+        <rect x="11.1" y="8.4" width="1.8" height="5.6" rx=".9" fill="#7a4b00"/>
+        <circle cx="12" cy="16.8" r="1.2" fill="#7a4b00"/>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" fill="url(#g-leaf)"/>
+        <path d="m7.8 12.2 2.8 2.8 5.6-6" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6.6 6.6 10.8 10.8M17.4 6.6 6.6 17.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-logout" viewBox="0 0 24 24">
+        <path d="M9 4.4H5.8A1.8 1.8 0 0 0 4 6.2v11.6a1.8 1.8 0 0 0 1.8 1.8H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M10.4 12h9.4m0 0-3.4-3.4M19.8 12l-3.4 3.4" fill="none" stroke="url(#g-aqua)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M20 12a8 8 0 1 1-2.6-5.9" fill="none" stroke="url(#g-aqua)" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M19.8 3.4v4.8h-4.8" fill="none" stroke="url(#g-leaf)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <div class="scene" aria-hidden="true">
+    <div class="sky"></div>
+    <div class="sun"></div>
+    <div class="aurora aurora--a"></div>
+    <div class="aurora aurora--b"></div>
+    <div class="aurora aurora--c"></div>
+    <div class="bokeh bokeh--1"></div>
+    <div class="bokeh bokeh--2"></div>
+    <div class="bokeh bokeh--3"></div>
+    <div class="bokeh bokeh--4"></div>
+    <span class="bubble b1"></span><span class="bubble b2"></span><span class="bubble b3"></span>
+    <span class="bubble b4"></span><span class="bubble b5"></span><span class="bubble b6"></span>
+    <span class="bubble b7"></span><span class="bubble b8"></span><span class="bubble b9"></span>
+    <span class="bubble b10"></span><span class="bubble b11"></span><span class="bubble b12"></span>
+    <span class="drop d1"></span><span class="drop d2"></span><span class="drop d3"></span>
+    <span class="drop d4"></span><span class="drop d5"></span>
+    <svg class="hills" viewBox="0 0 1440 420" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="hill-far" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#c9f7a2"/><stop offset="1" stop-color="#6ed873"/>
+        </linearGradient>
+        <linearGradient id="hill-mid" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#a4ef8a"/><stop offset="1" stop-color="#35b967"/>
+        </linearGradient>
+        <linearGradient id="hill-near" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#83e57b"/><stop offset="1" stop-color="#1c9a5b"/>
+        </linearGradient>
+      </defs>
+      <path d="M0 250c180-42 318 42 486 16 168-26 292-104 470-74s304 116 484 66v162H0Z" fill="url(#hill-far)" opacity=".78"/>
+      <path d="M0 312c164-42 306 26 474 4 168-22 292-84 468-54s296 86 498 40v118H0Z" fill="url(#hill-mid)" opacity=".9"/>
+      <path d="M0 362c196-30 358 30 536 12 178-18 320-52 500-30 180 22 300 62 404 40v36H0Z" fill="url(#hill-near)"/>
+      <path d="M0 312c164-42 306 26 474 4 168-22 292-84 468-54s296 86 498 40" fill="none" stroke="#ffffff" stroke-width="2" opacity=".35"/>
+    </svg>
+    <div class="grain"></div>
+  </div>
+
+  <header class="topbar aero">
+    <a class="brand" href="/" aria-label="TFTP DROP, trang chủ">
+      <span class="brand__orb" aria-hidden="true"><svg class="ico ico--drop"><use href="#i-drop"></use></svg></span>
+      <span class="brand__text"><strong>TFTP <span>DROP</span></strong><small>LAN OASIS</small></span>
+    </a>
+
+    <nav class="nav-links workspace-only" id="nav-links" aria-label="Điều hướng không gian làm việc" hidden>
+      <a href="#files-panel">Tệp</a>
+      <a href="#chat-panel">Trò chuyện</a>
+      <a href="#admin" id="nav-admin" hidden>Quản trị</a>
+    </nav>
+
+    <label class="search workspace-only" id="search-field" hidden>
+      <svg class="ico" aria-hidden="true"><use href="#i-search"></use></svg>
+      <input id="search" type="search" placeholder="Tìm tệp, tin nhắn…" aria-label="Tìm tệp hoặc tin nhắn" autocomplete="off">
+    </label>
+
+    <div class="topbar__end">
+      <span class="lan-chip" id="lan-chip"><i aria-hidden="true"></i><span>MẠNG NỘI BỘ</span></span>
+      <div id="account" class="account" hidden>
+        <span class="avatar" id="user-avatar" aria-hidden="true">A</span>
+        <span class="account__copy">
+          <strong id="username">alice</strong>
+          <span class="badge" id="user-role">Thành viên</span>
+        </span>
+        <button id="logout" class="gel gel--glass gel--sm" type="button">
+          <svg class="ico" aria-hidden="true"><use href="#i-logout"></use></svg>
+          <span>Đăng xuất</span>
+        </button>
+      </div>
+    </div>
   </header>
 
-  <main>
-    <p id="boot-status" class="notice" role="status">Đang kết nối máy chủ…</p>
-    <button id="reconnect" class="quiet" type="button" hidden>Thử kết nối lại</button>
-    <noscript>Vui lòng bật JavaScript để đăng nhập, truyền file và trò chuyện.</noscript>
-    <section id="auth" class="auth-layout" hidden aria-label="Truy cập cổng LAN">
-      <div class="welcome">
-        <p class="eyebrow">CÙNG MỘT MẠNG. CÙNG MỘT KHÔNG GIAN.</p>
-        <h1>Chuyển file.<br><span>Nối cuộc trò chuyện.</span></h1>
-        <p class="lead">Một nơi để chia sẻ tài liệu và trao đổi với mọi người trong mạng LAN của bạn.</p>
-        <div class="feature"><span>01 /</span><p><strong>File ngay trong tầm tay</strong><br>Gửi lên, xem danh sách và tải về từ máy chủ.</p></div>
-        <div class="feature"><span>02 /</span><p><strong>Trao đổi cùng mọi người</strong><br>Một phòng chat chung cho các thành viên.</p></div>
-        <p class="footnote">Thiết bị cần kết nối cùng mạng với máy chủ.</p>
+  <main class="shell">
+    <h1 class="sr-only">TFTP DROP — cổng chia sẻ tệp và trò chuyện trong mạng LAN</h1>
+    <p id="boot-status" class="notice boot" role="status">Đang kết nối máy chủ LAN…</p>
+    <button id="reconnect" class="gel gel--aqua" type="button" hidden>Thử kết nối lại</button>
+    <noscript><p class="notice is-error">Vui lòng bật JavaScript để đăng nhập, truyền tệp và trò chuyện.</p></noscript>
+
+    <section id="auth" class="auth" hidden aria-label="Truy cập cổng LAN">
+      <div class="auth__intro">
+        <p class="eyebrow">CÙNG MỘT MẠNG · CÙNG MỘT KHOẢNG TRỜI</p>
+        <h1>Một không gian xanh<br><span>cho tệp và trò chuyện.</span></h1>
+        <p class="lead">Gửi tài liệu, tải tệp và trò chuyện với mọi người trong mạng LAN — tất cả trong một cửa sổ trong veo, không quảng cáo, không đám mây bên ngoài.</p>
+        <ul class="features">
+          <li>
+            <span class="feature__icon"><svg class="ico"><use href="#i-files"></use></svg></span>
+            <div><strong>Tệp ngay trong tầm tay</strong><p>Tải lên, xem và tải về từ máy chủ TFTP nội bộ.</p></div>
+          </li>
+          <li>
+            <span class="feature__icon"><svg class="ico"><use href="#i-chat"></use></svg></span>
+            <div><strong>Trò chuyện tức thì</strong><p>Một phòng chat chung, cập nhật mỗi vài giây.</p></div>
+          </li>
+          <li>
+            <span class="feature__icon"><svg class="ico"><use href="#i-shield"></use></svg></span>
+            <div><strong>Quản trị an toàn</strong><p>Khóa tài khoản, hạn chế chat và dọn lịch sử khi cần.</p></div>
+          </li>
+        </ul>
+        <p class="footnote">Thiết bị cần kết nối cùng mạng với máy chủ. HTTP nội bộ, không mã hóa TLS.</p>
       </div>
-      <div class="auth-panel">
-        <div class="tabs" role="group" aria-label="Chọn đăng nhập hoặc đăng ký">
-          <button id="login-tab" type="button" aria-pressed="true">Đăng nhập</button>
-          <button id="register-tab" type="button" aria-pressed="false">Tạo tài khoản</button>
-        </div>
-        <h2 id="auth-title">Chào mừng trở lại.</h2>
-        <p id="auth-copy" class="muted">Đăng nhập để truy cập file và phòng chat.</p>
-        <form id="auth-form">
-          <label for="auth-name">Tên tài khoản</label>
-          <input id="auth-name" name="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_]{3,32}" autocomplete="username" aria-describedby="name-help">
-          <p id="name-help" class="hint">3–32 ký tự: chữ không dấu, số hoặc dấu _.</p>
-          <label for="auth-password">Mật khẩu</label>
-          <input id="auth-password" name="password" type="password" required minlength="8" maxlength="128" autocomplete="current-password" aria-describedby="password-help">
-          <p id="password-help" class="hint">Từ 8 đến 128 ký tự.</p>
-          <div id="confirm-field" hidden>
-            <label for="auth-confirm">Nhập lại mật khẩu</label>
-            <input id="auth-confirm" type="password" maxlength="128" autocomplete="new-password">
+
+      <div class="auth__card aero window">
+        <header class="window__bar">
+          <span class="window__icon"><svg class="ico"><use href="#i-sparkle"></use></svg></span>
+          <div class="window__title">
+            <p class="window__eyebrow">CỔNG VÀO</p>
+            <h2 id="auth-title">Chào mừng trở lại</h2>
           </div>
-          <p id="auth-error" class="error" role="alert" hidden></p>
-          <button id="auth-submit" class="primary full" type="submit" disabled>Vào không gian chung <span aria-hidden="true">→</span></button>
-        </form>
-        <p class="auth-note">Tài khoản được lưu trên máy chủ LAN này.</p>
+        </header>
+        <div class="window__body auth__body">
+          <div class="tabs" role="group" aria-label="Chọn đăng nhập hoặc đăng ký">
+            <button id="login-tab" type="button" aria-pressed="true">Đăng nhập</button>
+            <button id="register-tab" type="button" aria-pressed="false">Tạo tài khoản</button>
+          </div>
+          <p id="auth-copy" class="muted">Đăng nhập để truy cập tệp và phòng chat.</p>
+          <form id="auth-form" autocomplete="on">
+            <div class="field">
+              <label for="auth-name">Tên tài khoản</label>
+              <input id="auth-name" name="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_]{3,32}" autocomplete="username" aria-describedby="name-help" placeholder="alice_nguyen">
+              <p id="name-help" class="hint">3–32 ký tự: chữ không dấu, số hoặc dấu _.</p>
+            </div>
+            <div class="field">
+              <label for="auth-password">Mật khẩu</label>
+              <input id="auth-password" name="password" type="password" required minlength="8" maxlength="128" autocomplete="current-password" aria-describedby="password-help" placeholder="Tối thiểu 8 ký tự">
+              <p id="password-help" class="hint">Từ 8 đến 128 ký tự.</p>
+            </div>
+            <div class="field" id="confirm-field" hidden>
+              <label for="auth-confirm">Nhập lại mật khẩu</label>
+              <input id="auth-confirm" type="password" maxlength="128" autocomplete="new-password">
+            </div>
+            <p id="auth-error" class="error" role="alert" hidden></p>
+            <button id="auth-submit" class="gel gel--aqua gel--block" type="submit" disabled>
+              <span>Vào không gian chung</span><span aria-hidden="true">→</span>
+            </button>
+          </form>
+          <p class="auth__note"><svg class="ico" aria-hidden="true"><use href="#i-shield"></use></svg> Tài khoản chỉ lưu trên máy chủ LAN này.</p>
+        </div>
       </div>
     </section>
 
-    <section id="workspace" hidden aria-label="Không gian chia sẻ">
-      <div class="workspace-heading"><div><p class="eyebrow">KHÔNG GIAN CHUNG</p><h1>Gửi. Nhận. <span>Kết nối.</span></h1></div><p class="muted">File và cuộc trò chuyện<br>trong mạng của bạn.</p></div>
-      <div class="workspace-grid">
-        <section class="files-panel panel" aria-labelledby="files-heading">
-          <div class="panel-heading"><div><p class="eyebrow">01 / CHIA SẺ</p><h2 id="files-heading">File trên máy chủ <span id="file-count" class="count">0</span></h2></div><button id="refresh-files" class="quiet" type="button">Làm mới ↻</button></div>
-          <form id="upload-form" class="upload-area">
-            <label for="upload-file">Gửi thêm một file</label>
-            <p class="hint" id="upload-limit">File được chuyển tới máy chủ trong LAN.</p>
-            <div class="upload-row"><input id="upload-file" name="file" type="file" required aria-describedby="upload-limit"><button class="primary" type="submit" id="upload-submit">Gửi file ↑</button></div>
-          </form>
-          <p id="file-status" class="notice" role="status" hidden></p>
-          <div class="table-scroll"><table><thead><tr><th scope="col">TÊN FILE</th><th scope="col">DUNG LƯỢNG</th><th scope="col"><span class="sr-only">Thao tác</span></th></tr></thead><tbody id="file-list"></tbody></table></div>
-          <p id="files-empty" class="empty" hidden>Chưa có file nào. Gửi file đầu tiên để bắt đầu chia sẻ.</p>
-          <p class="panel-footnote">Danh sách dùng chung cho các thành viên đã đăng nhập.</p>
+    <section id="workspace" class="workspace" hidden aria-label="Không gian chia sẻ">
+      <div class="welcome aero">
+        <div class="welcome__main">
+          <p class="eyebrow" id="workspace-date">KHÔNG GIAN CHUNG</p>
+          <h1 id="greeting">Chào buổi sáng, <span>bạn.</span></h1>
+          <p class="welcome__sub">Bầu trời hôm nay trong veo — tệp và cuộc trò chuyện đang chờ bạn.</p>
+        </div>
+        <div class="instruments" role="group" aria-label="Tình trạng không gian">
+          <div class="instrument">
+            <span class="instrument__icon instrument__icon--aqua"><svg class="ico"><use href="#i-files"></use></svg></span>
+            <span class="instrument__copy"><small>TỆP</small><strong id="stat-files">0</strong></span>
+          </div>
+          <div class="instrument">
+            <span class="instrument__icon instrument__icon--leaf"><svg class="ico"><use href="#i-chat"></use></svg></span>
+            <span class="instrument__copy"><small>TIN NHẮN</small><strong id="stat-messages">0</strong></span>
+          </div>
+          <div class="instrument">
+            <span class="instrument__icon instrument__icon--gold"><svg class="ico"><use href="#i-shield"></use></svg></span>
+            <span class="instrument__copy"><small>KẾT NỐI</small><strong id="stat-status">ổn định</strong></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="workspace__grid">
+        <section class="aero window files" id="files-panel" aria-labelledby="files-heading">
+          <header class="window__bar">
+            <span class="window__icon"><svg class="ico"><use href="#i-files"></use></svg></span>
+            <div class="window__title">
+              <p class="window__eyebrow">01 / CHIA SẺ</p>
+              <h2 id="files-heading">Tệp trên máy chủ <span class="count" id="file-count">0</span></h2>
+            </div>
+            <button id="refresh-files" class="gel gel--glass gel--sm" type="button">
+              <svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg><span>Làm mới</span>
+            </button>
+          </header>
+
+          <div class="window__body">
+            <form id="upload-form" class="upload" aria-label="Gửi tệp lên máy chủ">
+              <div class="drop-zone" id="drop-zone">
+                <span class="drop-zone__orb" aria-hidden="true"><svg class="ico"><use href="#i-upload"></use></svg></span>
+                <div class="drop-zone__copy">
+                  <label for="upload-file">Kéo thả tệp vào đây</label>
+                  <p class="hint" id="upload-limit">Tối đa 100 MB mỗi tệp.</p>
+                  <p class="hint drop-zone__file" id="upload-name" aria-live="polite">Chưa chọn tệp nào</p>
+                </div>
+                <input id="upload-file" name="file" type="file" class="sr-only" aria-describedby="upload-limit">
+                <button id="choose-file" class="gel gel--glass" type="button">
+                  <svg class="ico" aria-hidden="true"><use href="#i-files"></use></svg><span>Chọn tệp</span>
+                </button>
+                <button id="upload-submit" class="gel" type="submit">Gửi tệp <span aria-hidden="true">↑</span></button>
+              </div>
+              <div class="progress" id="progress" role="progressbar" aria-label="Tiến trình gửi tệp" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                <span class="progress__fill" id="progress-fill"></span>
+              </div>
+              <p class="hint progress__label" id="progress-label" hidden></p>
+              <p id="file-status" class="notice" role="status" hidden></p>
+            </form>
+
+            <div class="table-wrap">
+              <table class="files-table">
+                <caption class="sr-only">Danh sách tệp chia sẻ trên máy chủ</caption>
+                <thead><tr><th scope="col">TÊN TỆP</th><th scope="col">DUNG LƯỢNG</th><th scope="col"><span class="sr-only">Thao tác</span></th></tr></thead>
+                <tbody id="file-list"></tbody>
+              </table>
+              <p id="files-empty" class="empty" hidden>
+                <span class="empty__orb" aria-hidden="true"><svg class="ico"><use href="#i-files"></use></svg></span>
+                <strong>Chưa có tệp nào</strong>
+                <span>Gửi tệp đầu tiên để bắt đầu chia sẻ.</span>
+              </p>
+            </div>
+            <p class="panel-footnote">Danh sách dùng chung cho các thành viên đã đăng nhập.</p>
+          </div>
         </section>
-        <section class="chat-panel panel" aria-labelledby="chat-heading">
-          <div class="panel-heading"><div><p class="eyebrow">02 / TRÒ CHUYỆN</p><h2 id="chat-heading">Phòng chat chung</h2></div><span id="chat-state" class="chat-state" role="status">Đang kết nối</span></div>
-          <div id="messages" class="messages" role="log" aria-label="Tin nhắn trong phòng chung" aria-live="polite" aria-relevant="additions"><p id="chat-empty" class="empty">Chưa có tin nhắn.<br>Bắt đầu bằng một lời chào!</p></div>
-          <button id="new-messages" type="button" class="quiet" hidden>Xem tin nhắn mới ↓</button>
-          <form id="chat-form" class="chat-compose">
-            <label for="chat-body">Tin nhắn của bạn</label>
-            <textarea id="chat-body" name="body" rows="2" maxlength="2000" required placeholder="Viết lời nhắn cho mọi người…" aria-describedby="chat-help"></textarea>
-            <div class="compose-bottom"><span id="chat-help" class="hint">Enter để gửi · Shift + Enter xuống dòng</span><button id="chat-submit" class="primary" type="submit">Gửi ↗</button></div>
+
+        <section class="aero window chat" id="chat-panel" aria-labelledby="chat-heading">
+          <header class="window__bar">
+            <span class="window__icon"><svg class="ico"><use href="#i-chat"></use></svg></span>
+            <div class="window__title">
+              <p class="window__eyebrow">02 / TRÒ CHUYỆN</p>
+              <h2 id="chat-heading">Phòng chat chung</h2>
+            </div>
+            <span id="chat-state" class="pill pill--live" role="status"><i aria-hidden="true"></i> Đang kết nối</span>
+          </header>
+
+          <div class="chat__body">
+            <div id="chat-restriction" class="alert alert--warn" role="status" hidden>
+              <svg class="ico" aria-hidden="true"><use href="#i-mute"></use></svg>
+              <div><strong>Bạn đang bị hạn chế gửi tin nhắn</strong><p id="restriction-text"></p></div>
+            </div>
+            <div id="messages" class="messages" role="log" aria-label="Tin nhắn trong phòng chung" aria-live="polite" aria-relevant="additions">
+              <p id="chat-empty" class="empty">
+                <span class="empty__orb" aria-hidden="true"><svg class="ico"><use href="#i-chat"></use></svg></span>
+                <strong>Chưa có tin nhắn</strong>
+                <span>Bắt đầu bằng một lời chào!</span>
+              </p>
+            </div>
+            <button id="new-messages" class="new-messages" type="button" hidden>Tin nhắn mới <span aria-hidden="true">↓</span></button>
+          </div>
+
+          <form id="chat-form" class="compose">
+            <label class="sr-only" for="chat-body">Tin nhắn của bạn</label>
+            <div class="compose__field">
+              <textarea id="chat-body" name="body" rows="2" maxlength="2000" required placeholder="Viết lời nhắn cho mọi người…" aria-describedby="chat-help"></textarea>
+              <button id="chat-submit" class="gel gel--aqua" type="submit"><span>Gửi</span><span aria-hidden="true">↗</span></button>
+            </div>
+            <div class="compose__meta">
+              <span id="chat-help" class="hint">Enter để gửi · Shift + Enter xuống dòng</span>
+              <span class="hint" id="chat-counter">0/2000</span>
+            </div>
             <p id="chat-error" class="error" role="alert" hidden></p>
           </form>
         </section>
       </div>
+
+      <section class="aero window admin" id="admin" aria-labelledby="admin-heading" hidden>
+        <header class="window__bar">
+          <span class="window__icon window__icon--shield"><svg class="ico"><use href="#i-shield"></use></svg></span>
+          <div class="window__title">
+            <p class="window__eyebrow">03 / QUẢN TRỊ</p>
+            <h2 id="admin-heading">Bảng điều khiển</h2>
+          </div>
+          <span id="admin-state" class="pill pill--admin"><svg class="ico" aria-hidden="true"><use href="#i-crown"></use></svg> Quản trị viên</span>
+          <button id="admin-refresh" class="gel gel--glass gel--sm" type="button">
+            <svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg><span>Đồng bộ</span>
+          </button>
+        </header>
+
+        <div class="window__body admin__body">
+          <div class="stats" role="group" aria-label="Số liệu cộng đồng">
+            <article class="stat stat--aqua"><span class="stat__icon"><svg class="ico"><use href="#i-users"></use></svg></span><strong id="stat-users">0</strong><span>Thành viên</span></article>
+            <article class="stat stat--gold"><span class="stat__icon"><svg class="ico"><use href="#i-crown"></use></svg></span><strong id="stat-admins">0</strong><span>Quản trị</span></article>
+            <article class="stat stat--coral"><span class="stat__icon"><svg class="ico"><use href="#i-ban"></use></svg></span><strong id="stat-banned">0</strong><span>Đang bị khóa</span></article>
+            <article class="stat stat--leaf"><span class="stat__icon"><svg class="ico"><use href="#i-mute"></use></svg></span><strong id="stat-muted">0</strong><span>Hạn chế chat</span></article>
+            <article class="stat stat--cyan"><span class="stat__icon"><svg class="ico"><use href="#i-chat"></use></svg></span><strong id="stat-total-messages">0</strong><span>Tin nhắn</span></article>
+          </div>
+
+          <div class="admin__grid">
+            <section class="members-panel" aria-labelledby="members-heading">
+              <div class="panel-head">
+                <div><p class="eyebrow">THÀNH VIÊN</p><h3 id="members-heading">Quyền truy cập &amp; trò chuyện</h3></div>
+                <button id="clear-chat" class="gel gel--danger gel--sm" type="button">
+                  <svg class="ico" aria-hidden="true"><use href="#i-trash"></use></svg><span>Xóa toàn bộ lịch sử chat</span>
+                </button>
+              </div>
+              <p class="hint members-panel__hint">Khóa tài khoản sẽ thu hồi mọi phiên đang mở. Quản trị viên cần được hạ quyền trước khi khóa hoặc hạn chế chat.</p>
+              <div id="members" class="members">
+                <p class="empty" id="members-empty">
+                  <span class="empty__orb" aria-hidden="true"><svg class="ico"><use href="#i-users"></use></svg></span>
+                  <strong>Đang tải thành viên…</strong>
+                </p>
+              </div>
+            </section>
+
+            <div class="admin__side">
+              <aside class="log-panel" aria-labelledby="log-heading">
+                <div class="panel-head">
+                  <div><p class="eyebrow">NHẬT KÝ</p><h3 id="log-heading">Kiểm duyệt gần đây</h3></div>
+                </div>
+                <ol id="actions-log" class="log"></ol>
+                <p class="hint log-panel__hint">Mọi thao tác quản trị được ghi lại kèm người thực hiện.</p>
+              </aside>
+
+              <section class="quick-panel" aria-labelledby="quick-heading">
+                <p class="eyebrow">MẸO NHANH</p>
+                <h3 id="quick-heading">Kiểm duyệt an toàn</h3>
+                <ul class="quick-list">
+                  <li>
+                    <span class="quick-icon quick-icon--coral"><svg class="ico" aria-hidden="true"><use href="#i-ban"></use></svg></span>
+                    <p><strong>Khóa</strong> thu hồi mọi phiên đang mở ngay khi xác nhận.</p>
+                  </li>
+                  <li>
+                    <span class="quick-icon quick-icon--gold"><svg class="ico" aria-hidden="true"><use href="#i-mute"></use></svg></span>
+                    <p><strong>Hạn chế chat</strong> vẫn cho thành viên đọc phòng chat.</p>
+                  </li>
+                  <li>
+                    <span class="quick-icon quick-icon--leaf"><svg class="ico" aria-hidden="true"><use href="#i-crown"></use></svg></span>
+                    <p><strong>Cấp quyền</strong> chỉ áp dụng khi tài khoản không bị khóa hay hạn chế.</p>
+                  </li>
+                  <li>
+                    <span class="quick-icon quick-icon--aqua"><svg class="ico" aria-hidden="true"><use href="#i-trash"></use></svg></span>
+                    <p><strong>Xóa lịch sử</strong> không thể hoàn tác — kiểm tra kỹ trước khi xác nhận.</p>
+                  </li>
+                </ul>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span class="footer__brand"><span class="footer__orb" aria-hidden="true"></span> TFTP DROP <span class="muted">/ LAN OASIS</span></span>
+        <span class="muted">Kết nối nội bộ · HTTP không mã hóa · Dữ liệu lưu trên máy chủ</span>
+      </footer>
     </section>
-    <footer><span>TFTP DROP <span class="muted">/ LAN WORKSPACE</span></span><span>Kết nối nội bộ · HTTP không mã hóa</span></footer>
   </main>
+
+  <div id="modal-root" class="modal-root" hidden></div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 </body>
 </html>

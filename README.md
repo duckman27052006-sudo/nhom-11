@@ -8,7 +8,7 @@ phần tùy chọn cần cài dependency riêng.
 |---|---|---|
 | Server | `tftp/tftp_server.py` | Đa luồng, mỗi phiên một TID riêng, hỗ trợ đọc/ghi |
 | Client | `tftp/tftp_client.py` | Tải về (RRQ) và gửi lên (WRQ), có CLI |
-| Web LAN | `tftp/web_upload/`, `tftp/web_store.py` | Tài khoản, tải/gửi file và phòng chat chung (extras `[web]`) |
+| Web LAN | `tftp/web_upload/`, `tftp/web_store.py` | Tài khoản, vai trò quản trị, kiểm duyệt chat, tải/gửi file và phòng chat chung (extras `[web]`) |
 | GUI | `tftp/tftp_gui.py`, `tftp/gui/` | Giao diện PySide6: `theme` (màu), `components` (vẽ bề mặt), `motion` (hiệu ứng), `main_window` (4 trang) |
 | Gói tin | `tftp/tftp_packet.py` | Đóng gói / giải mã RRQ, WRQ, DATA, ACK, ERROR, OACK |
 | Mã lỗi | `tftp/tftp_errors.py` | Bảng mã lỗi RFC 1350 + ngoại lệ |
@@ -18,6 +18,7 @@ phần tùy chọn cần cài dependency riêng.
 | Số liệu | `tftp/tftp_metrics.py` | Counter / gauge / timer, xuất log + JSON |
 | Ghi file | `tftp/tftp_fs.py` | Commit atomic không ghi đè, có fallback cho filesystem không hỗ trợ hard link |
 | Test | `tests/` | Unit + tích hợp + fuzz + soak, gồm IPv4/IPv6 |
+| Triển khai | `deploy/` | Docker Compose + WireGuard/Caddy mẫu cho nhiều trụ sở |
 
 ## 1. Cài đặt
 
@@ -94,7 +95,10 @@ python -m tftp.web_upload --host 127.0.0.1 --port 8080 --root files
 ```
 
 Mở `http://127.0.0.1:8080`, tạo tài khoản để xem/gửi/tải file và trò chuyện trong
-phòng chat chung. Đăng ký thành công tự đăng nhập. Tài khoản, phiên và lịch sử
+phòng chat chung. Đăng ký thành công tự đăng nhập. Tài khoản đầu tiên là quản trị
+viên: mở mục **Quản trị** để khóa/mở khóa thành viên, hạn chế chat, cấp/hạ quyền và
+xóa lịch sử trò chuyện. Cấp quyền cho tài khoản khác bằng
+`--admin <tên_tài_khoản>`. Tài khoản, phiên, vai trò, nhật ký kiểm duyệt và lịch sử
 chat lưu trong `web-data/`, tách khỏi thư mục file.
 
 Cho điện thoại/máy khác cùng LAN truy cập: thay lệnh terminal 2 bằng lệnh sau
@@ -107,7 +111,8 @@ python -m tftp.web_upload --host 192.168.1.10 --port 8080 --allowed-network 192.
 Thiết bị cùng mạng mở `http://192.168.1.10:8080`. Cho phép TCP 8080 trong firewall
 chỉ cho subnet LAN cần dùng. TFTP qua loopback nên không cần mở UDP cho thiết bị web.
 HTTP LAN không mã hóa; chỉ dùng trong mạng tin cậy. Hướng dẫn đầy đủ:
-[Cổng web LAN](docs/web-upload.md).
+[Cổng web LAN](docs/web-upload.md). Công ty có nhiều trụ sở: xem bộ triển khai
+[Docker + WireGuard](deploy/README.md).
 
 ### Bản CLI
 
@@ -272,6 +277,12 @@ tối đa 100 MiB; file trùng tên được TFTP server xử lý theo cấu hì
 `--overwrite`. Thay IP/subnet mẫu bằng cấu hình LAN thực tế và chỉ mở TCP 8080
 từ subnet đó trong firewall.
 
+Quản trị viên có bảng điều khiển riêng: khóa tài khoản (thu hồi phiên ngay), hạn
+chế gửi tin nhắn có thời hạn, cấp/hạ quyền, xóa từng tin hoặc xóa lịch sử chat của
+một thành viên/cả phòng. Tài khoản đầu tiên của data-dir trống là quản trị viên;
+dùng `--admin <tên>` để nâng một tài khoản đã đăng ký. Chi tiết quy tắc an toàn và
+bảng quyền: [Cổng web LAN](docs/web-upload.md).
+
 GitHub Pages có thể làm link vào công khai tại
 `https://duckman27052006-sudo.github.io/nhom-11/`. Trang yêu cầu người dùng nhập
 URL gateway LAN, lưu URL trên trình duyệt rồi chuyển tới gateway. Upload chỉ
@@ -280,7 +291,7 @@ DNS nội bộ như `upload.lan` để người dùng nhập URL dễ nhớ hơn
 nguồn **GitHub Actions** để workflow `.github/workflows/pages.yml` triển khai
 thư mục `site/`.
 
-Bind address chỉ nhận một IP private cụ thể (không nhận wildcard/public IP);
+Bind address chỉ nhận một IP private/CGNAT cụ thể (không nhận wildcard/public IP);
 gateway kiểm tra subnet client, Host header (chống DNS rebinding), giới hạn
 kích thước HTTP, kiểm tra Origin và CSRF và phiên tài khoản; danh sách, tải/gửi
 file và chat đều yêu cầu đăng nhập. Truy cập bằng tên miền nội bộ thì thêm
@@ -288,6 +299,20 @@ file và chat đều yêu cầu đăng nhập. Truy cập bằng tên miền n�
 TFTP server thấy IP của gateway; web log ghi IP trình duyệt. HTTP nội bộ không mã hóa TLS,
 TFTP cũng không mã hóa: không chuyển tiếp cổng từ Internet. Cấu hình đầy đủ:
 `docs/web-upload.md`.
+
+## 4d. Nhiều trụ sở
+
+Một công ty có hai văn phòng nên chạy **một** gateway trung tâm và nối hai LAN bằng
+VPN site-to-site; cả hai dùng chung một `web-data/portal.sqlite3`. Thêm cả hai
+subnet vào `--allowed-network`, và không NAT lưu lượng chi nhánh để ACL nhận đúng
+IP nguồn. Bộ Docker Compose + WireGuard mẫu, hướng dẫn HTTPS nội bộ và Tailscale:
+[deploy/README.md](deploy/README.md).
+
+Khi đặt gateway sau reverse proxy TLS, dùng `--trusted-proxy <CIDR>` và
+`--secure-cookie`; gateway chỉ tin `X-Forwarded-For/Proto/Host` từ IP proxy đã khai
+báo. `--host` và `--allowed-network` cũng chấp nhận dải Tailscale
+`100.64.0.0/10`. Muốn xem mô phỏng hai trụ sở ngay trên một máy:
+`python deploy/lab_two_sites.py`.
 
 ## 5. Dùng như thư viện
 

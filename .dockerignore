@@ -1,0 +1,26 @@
+# Ngữ cảnh build cho deploy/Dockerfile — giữ image nhỏ và không mang secrets.
+.git
+.github
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+build
+dist
+*.egg-info
+web-data
+files
+docs
+site
+tests
+*.pptx
+*.docx
+deploy/.env
+deploy/data
+deploy/wireguard/*.conf
+deploy/wireguard/*.key
+deploy/caddy/Caddyfile

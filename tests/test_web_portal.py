@@ -455,7 +455,8 @@ class WebTest(unittest.TestCase):
     def test_cli_rejects_public_wildcard_and_missing_allowlist(self):
         for args in [["--host", "0.0.0.0"], ["--host", "8.8.8.8"],
                      ["--host", "192.168.1.10"], ["--max-file-size", "0"],
-                     ["--tftp-server", "[::1]:70000"]]:
+                     ["--tftp-server", "[::1]:70000"],
+                     ["--trusted-proxy", "0.0.0.0/0"]]:
             with self.subTest(args=args), patch("sys.stderr", new=io.StringIO()):
                 with self.assertRaises(SystemExit) as exc:
                     main(args)

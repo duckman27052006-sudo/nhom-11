@@ -1,0 +1,17 @@
+# HTTPS nội bộ tuỳ chọn, đặt tại máy chủ chạy web gateway.
+# Khi dùng file này:
+#   WEB_HOST=127.0.0.1
+#   TRUSTED_PROXIES=127.0.0.1/32
+#   SECURE_COOKIE=1
+# Caddy tự gửi X-Forwarded-For/Proto/Host; app kiểm tra proxy tin cậy
+# bằng IP kết nối thật (127.0.0.1) nên không tin header từ client bên ngoài.
+#
+# `tls internal` tạo CA nội bộ — máy client cần tin CA này
+# (chạy `caddy trust` hoặc phân phối qua GPO/MDM).
+
+chat.congty.local {
+    tls internal
+
+    # reverse_proxy tự gửi X-Forwarded-For/Proto/Host theo Host gốc của request.
+    reverse_proxy 127.0.0.1:8080
+}

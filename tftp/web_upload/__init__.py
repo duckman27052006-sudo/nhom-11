@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,11 +23,22 @@ from .. import enable_utf8_console, tftp_errors
 from ..tftp_client import TftpClient
 from ..tftp_errors import TftpError
 from ..tftp_net import format_endpoint, parse_host_port
-from ..web_store import SESSION_SECONDS, Store
+from ..web_store import (
+    ADMIN,
+    MAX_REASON,
+    MEMBER,
+    SESSION_SECONDS,
+    Store,
+    StoreError,
+    StoreNotFound,
+)
 
 LOG = logging.getLogger("tftp.web")
 COOKIE = "tftp_session"
 USERNAME = re.compile(r"[A-Za-z0-9_]{3,32}\Z")
+FORWARDED_HOST = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?\Z"
+)
 
 
 class UploadConfigError(ValueError):
@@ -36,7 +48,8 @@ class UploadConfigError(ValueError):
 def private_network(value: str):
     network = ipaddress.ip_network(value, strict=False)
     ranges = [ipaddress.ip_network(cidr) for cidr in (
-        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "fc00::/7", "::1/128"
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+        "100.64.0.0/10", "fc00::/7", "::1/128"
     )]
     for allowed in ranges:
         if (isinstance(network, ipaddress.IPv4Network)
@@ -47,7 +60,48 @@ def private_network(value: str):
                 and isinstance(allowed, ipaddress.IPv6Network)):
             if network.subnet_of(allowed):
                 return network
-    raise UploadConfigError("Chỉ chấp nhận subnet private hoặc loopback cụ thể.")
+    raise UploadConfigError(
+        "Chỉ chấp nhận subnet private, CGNAT/Tailscale (100.64.0.0/10) hoặc loopback cụ thể."
+    )
+
+
+def _normalized(address: ipaddress.IPv4Address | ipaddress.IPv6Address):
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def forwarded_client(peer, header: str, trusted: list):
+    """Rightmost address in X-Forwarded-For that is not one of our own proxies."""
+    if not header:
+        return peer
+    candidates = []
+    for part in header.split(","):
+        try:
+            candidates.append(_normalized(ipaddress.ip_address(part.strip())))
+        except ValueError:
+            continue
+    for candidate in reversed(candidates):
+        if not any(candidate in network for network in trusted):
+            return candidate
+    return peer
+
+
+def forwarded_origin(headers, fallback: str) -> str:
+    """Rebuild the browser origin when a trusted proxy terminates TLS."""
+    scheme = (headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    host = (headers.get("X-Forwarded-Host") or "").split(",")[0].strip().lower()
+    if scheme not in {"http", "https"} or not host or len(host) > 255:
+        return fallback
+    if not FORWARDED_HOST.fullmatch(host):
+        return fallback
+    port = host.rsplit(":", 1)[1] if ":" in host and not host.endswith("]") else ""
+    if port:
+        if not 1 <= int(port) <= 65535:
+            return fallback
+        if (scheme, int(port)) in {("https", 443), ("http", 80)}:
+            host = host.rsplit(":", 1)[0]
+    return f"{scheme}://{host}"
 
 
 def validate_bind_host(value: str) -> str:
@@ -58,7 +112,9 @@ def validate_bind_host(value: str) -> str:
         private_network(f"{address}/{address.max_prefixlen}")
         return str(address)
     except ValueError as exc:
-        raise UploadConfigError("Host phải là IP private hoặc loopback cụ thể.") from exc
+        raise UploadConfigError(
+            "Host phải là IP private, loopback hoặc CGNAT cụ thể."
+        ) from exc
 
 
 def trusted_host_key(value: str) -> str | None:
@@ -92,6 +148,7 @@ def trusted_host_key(value: str) -> str | None:
 
 
 def create_app(config: dict | None = None, *, allowed_networks: list[str] | None = None,
+               trusted_proxies: list[str] | None = None,
                tftp_host: str | None = None, tftp_port: int | None = None,
                max_file_size: int | None = None,
                max_concurrent_uploads: int | None = None,
@@ -101,13 +158,14 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     app.config.from_mapping(
         FILE_ROOT="files", DATA_DIR="web-data", TFTP_HOST="127.0.0.1", TFTP_PORT=6969,
         TFTP_TIMEOUT=2, TFTP_RETRIES=3, MAX_FILE_SIZE=100 * 1024 * 1024,
-        ALLOWED_NETWORKS=["127.0.0.0/8", "::1/128"], COOKIE_SECURE=False,
-        MAX_CONCURRENT_UPLOADS=4, ALLOWED_HOSTS=["localhost", "127.0.0.1", "::1"],
+        ALLOWED_NETWORKS=["127.0.0.0/8", "::1/128"], TRUSTED_PROXIES=[],
+        COOKIE_SECURE=False, MAX_CONCURRENT_UPLOADS=4,
+        ALLOWED_HOSTS=["localhost", "127.0.0.1", "::1"],
         HEALTH_CACHE_SECONDS=5.0, HEALTH_TIMEOUT=1.0,
     )
     app.config.update(config or {})
-    overrides = dict(ALLOWED_NETWORKS=allowed_networks, TFTP_HOST=tftp_host,
-                     TFTP_PORT=tftp_port, MAX_FILE_SIZE=max_file_size,
+    overrides = dict(ALLOWED_NETWORKS=allowed_networks, TRUSTED_PROXIES=trusted_proxies,
+                     TFTP_HOST=tftp_host, TFTP_PORT=tftp_port, MAX_FILE_SIZE=max_file_size,
                      MAX_CONCURRENT_UPLOADS=max_concurrent_uploads,
                      ALLOWED_HOSTS=allowed_hosts)
     app.config.update({key: value for key, value in overrides.items() if value is not None})
@@ -149,13 +207,29 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     networks = [private_network(value) for value in app.config["ALLOWED_NETWORKS"]]
     if not networks:
         raise UploadConfigError("Cần ít nhất một subnet LAN được phép.")
+    trusted = [private_network(value) for value in app.config["TRUSTED_PROXIES"]]
     store = Store(data / "portal.sqlite3")
     app.extensions["web_store"] = store
+    if store.bootstrap_admin:
+        LOG.info("Tài khoản đầu tiên nhận quyền quản trị: %s", store.bootstrap_admin)
     slots = threading.BoundedSemaphore(app.config["MAX_CONCURRENT_UPLOADS"])
     app.config["UPLOAD_SEMAPHORE"] = slots
 
     def fail(message: str, status: int):
         return jsonify(error=message), status
+
+    def state_of(account):
+        return store.state(account)
+
+    def session_payload(account, csrf):
+        state = state_of(account)
+        return dict(user=account["username"] if account and account.get("user_id") else None,
+                    id=account["user_id"] if account else None,
+                    role=state["role"] if account and account.get("user_id") else None,
+                    csrf=csrf, max_file_size=app.config["MAX_FILE_SIZE"],
+                    chat=dict(muted=state["muted"], muted_until=state["muted_until"],
+                              mute_reason=state["mute_reason"]),
+                    can_moderate=state["role"] == ADMIN and bool(account))
 
     @app.before_request
     def protect():
@@ -174,15 +248,28 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         if request.path not in {"/api/files", "/api/upload"}:
             request.max_content_length = 16 * 1024
         try:
-            address = ipaddress.ip_address(request.remote_addr or "")
-            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-                address = address.ipv4_mapped
+            address = _normalized(ipaddress.ip_address(request.remote_addr or ""))
         except ValueError:
             return fail("Không xác định được địa chỉ thiết bị.", 403)
+        g.client_ip = str(address)
+        g.public_origin = request.host_url.rstrip("/")
+        if trusted and any(address in network for network in trusted):
+            address = forwarded_client(address, request.headers.get("X-Forwarded-For", ""),
+                                       trusted)
+            g.client_ip = str(address)
+            g.public_origin = forwarded_origin(request.headers, g.public_origin)
         if not any(address in network for network in networks):
+            LOG.warning("LAN ACL rejected client=%s path=%s", g.client_ip, request.path)
             return fail("Thiết bị không nằm trong mạng LAN được phép.", 403)
         g.token = request.cookies.get(COOKIE, "")
         g.account = store.session(g.token)
+        if g.account:
+            g.state = store.state(g.account)
+            if g.state["banned"]:
+                store.drop_session(g.token)
+                g.account = g.state = None
+                if request.path.startswith("/api/") and request.path != "/api/session":
+                    return fail("Tài khoản đã bị khóa. Hãy liên hệ quản trị viên.", 403)
         if request.path.startswith("/api/"):
             if request.path not in {"/api/session", "/api/register", "/api/login"}:
                 if not g.account or not g.account["user_id"]:
@@ -191,7 +278,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
                 origin = request.headers.get("Origin")
                 upload_request = request.path in {"/api/files", "/api/upload"}
                 if (upload_request and not origin) or (
-                        origin and origin != request.host_url.rstrip("/")):
+                        origin and origin != g.public_origin):
                     return fail("Nguồn yêu cầu không hợp lệ.", 403)
                 csrf = request.headers.get("X-CSRF-Token", "")
                 if (not g.account or not csrf
@@ -282,20 +369,18 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     def session_response(user_id=None):
         token, csrf = store.new_session(g.token, user_id)
         account = store.session(token)
-        response = jsonify(user=account["username"], csrf=csrf,
-                           max_file_size=app.config["MAX_FILE_SIZE"])
+        response = jsonify(session_payload(account, csrf))
         response.set_cookie(COOKIE, token, max_age=SESSION_SECONDS, httponly=True,
                             samesite="Lax", secure=app.config["COOKIE_SECURE"])
         return response
 
     @app.get("/api/session")
     def session():
-        if not g.account:
-            if not store.permit("session:" + request.remote_addr, 60):
+        if not g.account or not g.account.get("user_id"):
+            if not store.permit("session:" + g.client_ip, 60):
                 return fail("Quá nhiều yêu cầu. Hãy đợi một phút.", 429)
             return session_response()
-        return jsonify(user=g.account["username"], csrf=g.account["csrf"],
-                       max_file_size=app.config["MAX_FILE_SIZE"])
+        return jsonify(session_payload(g.account, g.account["csrf"]))
 
     def credentials():
         body = request.get_json()
@@ -311,20 +396,20 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
 
     @app.post("/api/register")
     def register():
-        if not store.permit("register:" + request.remote_addr, 5):
+        if not store.permit("register:" + g.client_ip, 5):
             return fail("Đăng ký quá nhiều lần. Hãy đợi một phút.", 429)
         values = credentials()
         if values is None:
             return fail("Tên tài khoản: 3–32 chữ, số hoặc _. Mật khẩu: 8–128 ký tự.", 400)
         try:
-            user_id = store.register(*values)
+            user_id, _ = store.register(*values)
         except sqlite3.IntegrityError:
             return fail("Tên tài khoản đã được sử dụng.", 409)
         return session_response(user_id)
 
     @app.post("/api/login")
     def login():
-        if not store.permit("login:" + request.remote_addr, 10):
+        if not store.permit("login:" + g.client_ip, 10):
             return fail("Đăng nhập quá nhiều lần. Hãy đợi một phút.", 429)
         values = credentials()
         if values is None:
@@ -332,6 +417,10 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         user_id = store.authenticate(*values)
         if user_id is None:
             return fail("Tên tài khoản hoặc mật khẩu không đúng.", 401)
+        state = store.state(store.user(user_id))
+        if state["banned"]:
+            reason = f" Lý do: {state['ban_reason']}." if state["ban_reason"] else ""
+            return fail(f"Tài khoản đã bị khóa.{reason}", 403)
         return session_response(user_id)
 
     @app.post("/api/logout")
@@ -446,7 +535,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
                         check_size(count, None)
                         handle.write(chunk)
                 client().upload(str(local), remote)
-            LOG.info("Upload from %s by %s", request.remote_addr, g.account["username"])
+            LOG.info("Upload from %s by %s", g.client_ip, g.account["username"])
             return jsonify(message="Đã gửi file thành công.", filename=remote, size=count), 201
         except ValueError:
             return fail("File vượt quá dung lượng cho phép.", 413)
@@ -471,15 +560,64 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         finally:
             slots.release()
 
+    def moderation_args():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise StoreError("Yêu cầu không hợp lệ.")
+        active = body.get("active")
+        if not isinstance(active, bool):
+            raise StoreError("Thiếu trạng thái cần áp dụng.")
+        minutes = body.get("minutes")
+        if minutes is not None and (not isinstance(minutes, int) or isinstance(minutes, bool)
+                                    or not 1 <= minutes <= 10080):
+            raise StoreError("Thời hạn phải từ 1 phút đến 7 ngày.")
+        reason = body.get("reason", "")
+        if not isinstance(reason, str) or len(reason) > MAX_REASON:
+            raise StoreError(f"Lý do tối đa {MAX_REASON} ký tự.")
+        return active, None if minutes is None else int(minutes), reason.strip()
+
+    def duration_label(minutes):
+        if not minutes:
+            return "vĩnh viễn"
+        if minutes % 1440 == 0:
+            return f"{minutes // 1440} ngày"
+        if minutes % 60 == 0:
+            return f"{minutes // 60} giờ"
+        return f"{minutes} phút"
+
+    def record(action, target_id, target, detail):
+        store.log(g.account["user_id"], g.account["username"], action, target_id, target, detail)
+
+    def admin_only(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            if state_of(g.account)["role"] != ADMIN:
+                return fail("Chỉ quản trị viên mới được thực hiện thao tác này.", 403)
+            return view(*args, **kwargs)
+        return wrapper
+
     @app.get("/api/messages")
     def messages():
         after = request.args.get("after")
         if after is not None and (not re.fullmatch(r"[0-9]{1,18}", after)):
             return fail("Mốc tin nhắn không hợp lệ.", 400)
-        return jsonify(messages=store.messages(int(after) if after is not None else None))
+        known = request.args.get("epoch")
+        if known is not None and not re.fullmatch(r"[0-9]{1,18}", known):
+            return fail("Mốc trò chuyện không hợp lệ.", 400)
+        epoch = store.epoch()
+        # A moderation action deleted messages, so the cursor is no longer trustworthy.
+        reset = after is not None and known is not None and int(known) != epoch
+        rows = store.messages(None if reset or after is None else int(after))
+        state = state_of(g.account)
+        return jsonify(messages=rows, epoch=epoch, reset=reset, chat=state,
+                       me=g.account["user_id"], can_moderate=state["role"] == ADMIN)
 
     @app.post("/api/messages")
     def send_message():
+        state = state_of(g.account)
+        if state["muted"]:
+            reason = f" Lý do: {state['mute_reason']}." if state["mute_reason"] else ""
+            return fail(f"Bạn đang bị hạn chế gửi tin nhắn.{reason}", 403)
         body = request.get_json()
         text = body.get("body") if isinstance(body, dict) else None
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 2000:
@@ -488,6 +626,109 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             return fail("Bạn gửi quá nhanh. Hãy đợi một phút.", 429)
         message_id = store.send(g.account["user_id"], text.strip())
         return jsonify(id=message_id), 201
+
+    @app.delete("/api/messages/<int:message_id>")
+    def delete_message(message_id):
+        admin = state_of(g.account)["role"] == ADMIN
+        try:
+            result = store.delete_message(message_id, g.account["user_id"], admin=admin)
+        except StoreNotFound as exc:
+            return fail(str(exc), 404)
+        except StoreError as exc:
+            return fail(str(exc), 403)
+        if admin:
+            record("delete", result["user_id"], result["username"], f"Xóa tin nhắn #{message_id}")
+        return jsonify(deleted=message_id, message="Đã xóa tin nhắn.")
+
+    @app.delete("/api/messages")
+    @admin_only
+    def clear_messages():
+        scope = request.args.get("scope", "all")
+        raw_user = request.args.get("user_id")
+        if scope == "user":
+            if not raw_user or not re.fullmatch(r"[0-9]{1,18}", raw_user):
+                return fail("Tài khoản cần xóa không hợp lệ.", 400)
+        elif scope != "all":
+            return fail("Phạm vi xóa không hợp lệ.", 400)
+        try:
+            result = store.purge_messages(scope, int(raw_user) if raw_user else None)
+        except StoreNotFound as exc:
+            return fail(str(exc), 404)
+        except StoreError as exc:
+            return fail(str(exc), 400)
+        detail = ("Xóa toàn bộ lịch sử chat" if scope == "all"
+                  else f"Xóa lịch sử chat của {result['username']}")
+        detail += f" · {result['deleted']} tin nhắn"
+        record("purge", int(raw_user) if scope == "user" and raw_user else None,
+               result["username"] if scope == "user" else "phòng chat chung", detail)
+        return jsonify(**result, message=detail)
+
+    @app.get("/api/admin/overview")
+    @admin_only
+    def admin_overview():
+        data = store.overview()
+        data["me"] = g.account["user_id"]
+        return jsonify(data)
+
+    @app.post("/api/admin/users/<int:user_id>/ban")
+    @admin_only
+    def admin_ban(user_id):
+        try:
+            if user_id == g.account["user_id"]:
+                raise StoreError("Không thể tự khóa tài khoản của mình.")
+            active, minutes, reason = moderation_args()
+            result = store.set_ban(user_id, active, minutes, reason)
+        except StoreNotFound as exc:
+            return fail(str(exc), 404)
+        except StoreError as exc:
+            return fail(str(exc), 400)
+        if active:
+            detail = f"Khóa {duration_label(minutes)}"
+            detail += f" · {reason}" if reason else ""
+        else:
+            detail = "Mở khóa tài khoản"
+        record("ban" if active else "unban", result["id"], result["username"], detail)
+        return jsonify(**result, message=detail)
+
+    @app.post("/api/admin/users/<int:user_id>/mute")
+    @admin_only
+    def admin_mute(user_id):
+        try:
+            if user_id == g.account["user_id"]:
+                raise StoreError("Không thể tự hạn chế chat của mình.")
+            active, minutes, reason = moderation_args()
+            result = store.set_mute(user_id, active, minutes, reason)
+        except StoreNotFound as exc:
+            return fail(str(exc), 404)
+        except StoreError as exc:
+            return fail(str(exc), 400)
+        if active:
+            detail = f"Hạn chế chat {duration_label(minutes)}"
+            detail += f" · {reason}" if reason else ""
+        else:
+            detail = "Bỏ hạn chế chat"
+        record("mute" if active else "unmute", result["id"], result["username"], detail)
+        return jsonify(**result, message=detail)
+
+    @app.post("/api/admin/users/<int:user_id>/role")
+    @admin_only
+    def admin_role(user_id):
+        try:
+            if user_id == g.account["user_id"]:
+                raise StoreError("Không thể tự đổi vai trò của mình.")
+            body = request.get_json(silent=True)
+            role = body.get("role") if isinstance(body, dict) else None
+            if role not in (ADMIN, MEMBER):
+                raise StoreError("Vai trò không hợp lệ.")
+            result = store.set_role(user_id, role)
+        except StoreNotFound as exc:
+            return fail(str(exc), 404)
+        except StoreError as exc:
+            return fail(str(exc), 400)
+        detail = "Cấp quyền quản trị" if role == ADMIN else "Hạ quyền quản trị viên"
+        if result["changed"]:
+            record("role", result["id"], result["username"], detail)
+        return jsonify(**result, message=detail)
 
     return app
 
@@ -503,6 +744,8 @@ def main(argv=None) -> int:
     parser.add_argument("--root", default="files", help="Cùng root với TFTP server")
     parser.add_argument("--data-dir", default="web-data")
     parser.add_argument("--allowed-network", action="append")
+    parser.add_argument("--trusted-proxy", action="append", metavar="CIDR",
+                        help="Proxy tin cậy được đọc X-Forwarded-For/Proto/Host; lặp lại được")
     parser.add_argument("--tftp-server", default="127.0.0.1:6969")
     parser.add_argument("--max-file-size", type=int, default=100, help="MiB mỗi file")
     parser.add_argument("--secure-cookie", action="store_true", help="Chỉ bật sau HTTPS proxy")
@@ -510,6 +753,8 @@ def main(argv=None) -> int:
                         help="Host header được phép thêm (tên miền nội bộ); lặp lại được")
     parser.add_argument("--max-concurrent-uploads", type=int, default=4)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--admin", metavar="USERNAME",
+                        help="Cấp quyền quản trị cho tài khoản đã có trong data-dir")
     args = parser.parse_args(argv)
     try:
         host = ipaddress.ip_address(validate_bind_host(args.host))
@@ -526,17 +771,29 @@ def main(argv=None) -> int:
                               TFTP_PORT=int(tftp_port), MAX_FILE_SIZE=args.max_file_size * 1024**2,
                               MAX_CONCURRENT_UPLOADS=args.max_concurrent_uploads,
                               ALLOWED_HOSTS=allowed_hosts,
+                              TRUSTED_PROXIES=args.trusted_proxy or [],
                               COOKIE_SECURE=args.secure_cookie))
-    except ValueError as exc:
+        if args.admin:
+            store = app.extensions["web_store"]
+            target = store.user_by_name(args.admin.strip())
+            if target is None:
+                raise ValueError(f"Không tìm thấy tài khoản {args.admin.strip()!r} trong data-dir.")
+            store.set_role(target["id"], ADMIN)
+    except (ValueError, StoreError) as exc:
         parser.error(str(exc))
     from waitress import serve
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     LOG.info("LAN portal: http://%s:%s; TFTP=%s; root=%s", host, args.port,
              args.tftp_server, Path(args.root).resolve())
+    if args.trusted_proxy:
+        LOG.info("Tin cậy X-Forwarded-* từ: %s", ", ".join(args.trusted_proxy))
     serve(app, host=str(host), port=args.port, threads=args.threads,
           max_request_body_size=app.config["MAX_CONTENT_LENGTH"],
-          ipv4=host.version == 4, ipv6=host.version == 6, clear_untrusted_proxy_headers=True)
+          ipv4=host.version == 4, ipv6=host.version == 6,
+          # Trusted-proxy handling lives in create_app and validates the socket peer,
+          # so Waitress must not strip forwarded headers before Flask sees them.
+          clear_untrusted_proxy_headers=False)
     return 0
 
 

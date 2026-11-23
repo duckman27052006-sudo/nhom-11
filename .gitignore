@@ -60,3 +60,59 @@ dist/
 build/
 *.egg-info/
 pip-wheel-metadata/
+
+# Deployment local config/secrets
+deploy/.env
+deploy/data/
+deploy/wireguard/*.conf
+deploy/wireguard/*.key
+deploy/wireguard/generated/
+*.msi
+*.qr.png
+
+# ---------------------------------------------------------------------------
+# Báo cáo / slide / bản nháp có HỌ TÊN và MSSV của thành viên.
+# TUYỆT ĐỐI không commit: repo này public, các thư mục dưới đây chứa dữ liệu
+# cá nhân của nhóm, không phải mã nguồn.
+# ---------------------------------------------------------------------------
+report_build/
+make_report_pptx.py
+make_contributions_pptx.py
+BaoCao_TFTP_Nhom11.docx
+Nhom11-TFTP.pptx
+*.docx
+*.pptx
+*.pdf
+*.doc
+*.ppt
+*.xls
+*.xlsx
+*.odt
+*.odp
+*.ods
+*.rtf
+
+# File khoá tạm của Office (~$BaoCao.docx xuất hiện khi đang mở file)
+~$*
+
+# File nén dùng để nộp bài — không bao giờ commit
+*.zip
+*.rar
+*.7z
+
+# Khoá / chứng chỉ / cấu hình bí mật
+*.key
+*.pem
+*.p12
+*.pfx
+*.kdbx
+id_rsa*
+id_ed25519*
+
+# File rác ở thư mục gốc (files/empty.dat vẫn được track nhờ quy tắc whitelist)
+/empty.dat
+
+# Bản nháp / ghi chú / log tạm
+_tmp/
+*.tmp
+scratch/

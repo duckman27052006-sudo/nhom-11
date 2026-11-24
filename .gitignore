@@ -6,6 +6,11 @@ __pycache__/
 venv/
 env/
 .env/
+.env
+.env.*
+# Chỉ commit bản mẫu, không bao giờ commit giá trị thật
+!.env.example
+!*.env.example
 __pypackages__/
 .mypy_cache/
 
@@ -48,6 +53,26 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Ảnh chụp/ghi chú cá nhân ở thư mục gốc: không bao giờ commit.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+/*.bmp
+/*.mp4
+/*.mov
+
+# File thông tin đăng nhập của công cụ (không commit)
+.netrc
+_netrc
+.pypirc
+.npmrc
+.git-credentials
+.aws/
+.ssh/
+*.ovpn
 
 # LAN web accounts, sessions and messages (never publish runtime data)
 web-data/

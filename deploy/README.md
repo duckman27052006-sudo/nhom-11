@@ -303,7 +303,7 @@ Có thể bind trực tiếp vào IP Tailscale `100.x` — phiên bản này đ�
 `100.64.0.0/10` trong `--host` và `--allowed-network`:
 
 ```dotenv
-WEB_HOST=100.101.20.5
+WEB_HOST=100.100.100.100
 ALLOWED_NETWORKS=100.64.0.0/10
 ```
 

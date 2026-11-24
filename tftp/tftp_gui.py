@@ -11,12 +11,18 @@ import argparse
 import os
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtWidgets import QApplication
 
 from . import enable_utf8_console
 from .gui import theme
-from .gui.main_window import MainWindow
+from .gui.main_window import APP_TITLE, ORG_NAME, MainWindow
+
+
+def _configure_application_identity() -> None:
+    """Đặt org/app trước khi tạo QApplication để QSettings có chỗ lưu ổn định."""
+    QCoreApplication.setOrganizationName(ORG_NAME)
+    QCoreApplication.setApplicationName(APP_TITLE)
 
 
 def build_application(argv: list[str] | None = None, *,
@@ -29,7 +35,9 @@ def build_application(argv: list[str] | None = None, *,
     # Biến môi trường này (nếu máy người dùng đặt) sẽ ép style native
     # (windowsvista) khiến input vẽ xám lệch khỏi card; app luôn dùng Fusion.
     os.environ.pop("QT_STYLE_OVERRIDE", None)
+    _configure_application_identity()
     app = QApplication(argv if argv is not None else sys.argv)
+    app.setApplicationDisplayName(APP_TITLE)
     # Fusion: nền vẽ giống nhau trên mọi nền tảng, dễ tô màu nhất quán.
     app.setStyle("Fusion")
     theme.apply_fonts(app)

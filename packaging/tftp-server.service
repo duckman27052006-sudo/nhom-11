@@ -1,6 +1,6 @@
 [Unit]
-Description=TFTP server (RFC 1350, IPv4/IPv6)
-Documentation=file:///opt/tftp/docs/deployment.md
+Description=TFTP server (RFC 1350/2347/7440, IPv4/IPv6)
+Documentation=https://github.com/duckman27052006-sudo/nhom-11#readme
 After=network-online.target
 Wants=network-online.target
 
@@ -9,16 +9,25 @@ Type=simple
 User=tftp
 Group=tftp
 WorkingDirectory=/opt/tftp
+Environment=PYTHONUNBUFFERED=1
+# Kiểm tra cấu hình trước khi mở listener: lỗi khóa/giá trị phải làm service
+# fail ngay, không chạy với cấu hình mặc định ngoài ý muốn.
+ExecStartPre=/usr/bin/python3 -m tftp.tftp_server --check-config --config /etc/tftp/server.json
 ExecStart=/usr/bin/python3 -m tftp.tftp_server --config /etc/tftp/server.json
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=10
+TimeoutStopSec=15
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/tftp
+StateDirectory=tftp
+LogsDirectory=tftp
+# Log mặc định nằm trong /var/log/tftp (LogsDirectory tạo & cấp quyền), không
+# phải /var/lib/tftp như bản cũ — bản cũ làm log không ghi được dưới ProtectSystem.
+ReadWritePaths=/var/lib/tftp /var/log/tftp
 LimitNOFILE=4096
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

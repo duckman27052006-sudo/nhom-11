@@ -230,6 +230,38 @@ class Metrics:
     def to_json(self, *, indent: int | None = None) -> str:
         return json.dumps(self.snapshot(), indent=indent, ensure_ascii=False)
 
+    def render_prometheus(self, prefix: str | None = None) -> str:
+        """Xuất theo định dạng text của Prometheus (không cần thư viện ngoài).
+
+        Counter thành ``*_total``; timer thành summary với ``_count``/``_sum``
+        và quantile p50/p95/p99 (đổi ms về giây). Tên được chuẩn hoá thành
+        ``[a-zA-Z0-9_]`` và gắn tiền tố để tránh đụng metric hệ thống.
+        """
+        snap = self.snapshot()
+        base = _prom_name(prefix or self.name)
+        lines: list[str] = [
+            f"# HELP {base}_uptime_seconds Thời gian chạy của tiến trình.",
+            f"# TYPE {base}_uptime_seconds gauge",
+            f"{base}_uptime_seconds {snap['uptime_s']}",
+        ]
+        for name, value in snap["counters"].items():
+            metric = f"{base}_{_prom_name(name)}_total"
+            lines.append(f"# TYPE {metric} counter")
+            lines.append(f"{metric} {value}")
+        for name, value in snap["gauges"].items():
+            metric = f"{base}_{_prom_name(name)}"
+            lines.append(f"# TYPE {metric} gauge")
+            lines.append(f"{metric} {value}")
+        for name, data in snap["timers"].items():
+            metric = f"{base}_{_prom_name(name)}_seconds"
+            lines.append(f"# TYPE {metric} summary")
+            lines.append(f"{metric}_count {data['count']}")
+            lines.append(f"{metric}_sum {data['total_s']}")
+            for percent in PERCENTILES:
+                value = round(float(data.get(f"p{percent}", 0.0)) / 1000.0, 6)
+                lines.append(f'{metric}{{quantile="0.{percent}"}} {value}')
+        return "\n".join(lines) + "\n"
+
     def reset(self) -> None:
         with self._lock:
             self._counters.clear()
@@ -243,6 +275,15 @@ class Metrics:
 
 def _number(value: float) -> float | int:
     return int(value) if float(value).is_integer() else round(float(value), 6)
+
+
+def _prom_name(name: str) -> str:
+    """Chuẩn hoá tên metric cho Prometheus: chữ/số/gạch dưới, không bắt đầu số."""
+    cleaned = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+    cleaned = cleaned.strip("_") or "metric"
+    if cleaned[0].isdigit():
+        cleaned = "m_" + cleaned
+    return cleaned
 
 
 def _fmt(value: float) -> str:

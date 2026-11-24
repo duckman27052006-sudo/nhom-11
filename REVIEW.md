@@ -4,6 +4,9 @@
 > · cập nhật 2026-11-01: thêm cổng web upload, IPv6, netascii CR NUL và 19 test hồi quy
 > · cập nhật 2026-11-02: pass review độc lập lần 3 — vá 2 lỗi P0, 4 lỗi P1 và
 >   toàn bộ mục P2 (xem §6); đổi tên package `src` → `tftp`
+> · cập nhật 2026-11-24: pass phát triển §7 — RFC 7440 windowsize, sửa 7 lỗi
+>   audit, tối ưu quota/TID/log, Prometheus/readyz, TLS mặc định, GUI queue/
+>   cancel/QSettings, web SSE + vòng đời file, CI Windows/GUI/coverage/interop
 > Phạm vi: `tftp/`, `tests/`, `docs/`, `README.md`, `pyproject.toml`, `.github/`
 > Kết luận nhanh: project ở mức **production-hardened cho môi trường LAN tin cậy**
 > — có fuzz có seed, soak/stress test, metrics vận hành và CI chạy riêng bộ soak.
@@ -227,4 +230,90 @@ mypy tftp                     → Success: no issues found in 20 source files
 
 Thời gian chạy bộ test còn **giảm** so với trước (37 s so với 41 s cho phần
 không soak) vì bug số 7 từng làm mỗi lượt upload chậm thêm đúng một `timeout`.
+
+---
+
+## 7. Pass phát triển 2026-11-24
+
+Bổ sung sau đợt review độc lập: không chỉ vá mà triển khai các tính năng còn
+thiếu trong roadmap (§5) và đóng các khoảng trống vận hành.
+
+### 7.1 Sửa lỗi thật
+
+| # | Lỗi | Vá |
+|---|---|---|
+| 1 | Lọc log GUI tìm `" INFO "` trong text hiển thị nên luôn rỗng; test cũ nhồi từ khoá nên che bug | Lọc theo level lưu trong `QTextBlockUserData`; test emit đúng định dạng formatter |
+| 2 | `--allow-subdirs` đọc `.git/config`, `.env`, `x.part` vì chỉ kiểm basename | Kiểm từng path component (`_is_valid_path_component`) |
+| 3 | Session bị gói rác "ghim" vô hạn: `_recv` chỉ `continue`, deadline không chạy | Ngân sách `MAX_STALE_PACKETS` + kiểm deadline trong `_recv`, client tương tự |
+| 4 | ERROR cho malformed/opcode lạ gửi **trước** rate limit → khuếch đại UDP | Hạn mức ERROR theo IP (`ERROR_REPLIES_PER_SECOND`) trước khi trả lời |
+| 5 | RFC 2348: blksize ngoài dải bị OACK bằng 1468 > giá trị client xin | Bỏ option, hai bên dùng 512 |
+| 6 | Dally `min(timeout, 1s)` ngắn hơn retransmit của client; TID đóng trước gói lặp | `max(timeout+0.25, dally)` (trần 10 s), TID giao cho **dally pool** một thread |
+| 7 | Huỷ transfer bị coi là timeout → thử DNS kế tiếp; progress netascii vượt 100 %; lỗi route không fallback | `TftpCancelled`, đếm byte nguồn, fallback theo errno địa chỉ |
+
+### 7.2 Tối ưu
+
+- Quota root: cache + cập nhật khi commit/evict, đi lại cây mỗi 30 s thay vì mỗi
+  upload mỗi giây dưới `_quota_lock`.
+- Cấp phát TID: random + scan có trần thay vì `list(range(...))` + shuffle mỗi
+  session.
+- GUI log view: cắt block cũ O(số dòng cắt), không dựng lại document mỗi dòng.
+- Web: nhả slot trước khi stream file (client đọc chậm không khoá portal),
+  download `conditional`/range, health probe ra ngoài lock, tăng worker timeout.
+
+### 7.3 Tính năng mới
+
+- **RFC 7440 windowsize** (`--windowsize`, 1..64) cho server/client: cửa sổ gửi
+  + go-back-N, negotiation không vượt giá trị client xin; test mất gói 20 % cả
+  hai chiều; benchmark `tools/benchmark.py` + `docs/benchmark.md`.
+- **Prometheus** `Metrics.render_prometheus()` + `/metrics` gateway (admin hoặc
+  `--metrics-token`); tách `/livez` và `/readyz`.
+- **TLS**: cookie `__Host-` + Secure tự bật sau reverse proxy HTTPS, HSTS,
+  COOP/CORP/Permissions-Policy, static cache.
+- **GUI**: QSettings, hàng đợi transfer, huỷ transfer, keyboard/accessibility,
+  `deleteLater` cho QThread.
+- **Web**: SSE chat (fallback polling), owner/`can_delete`, `DELETE
+  /api/files/<name>`, tự đổi tên khi trùng, dark mode, audit log có request id.
+- **CI/đóng gói**: matrix Linux 3.10–3.14 + Windows, GUI offscreen, coverage
+  ≥75 %, entry-point smoke, soak riêng, interop `tftpd-hpa`/`atftp`
+  (`scripts/interop.sh`), `pip-audit`, Dependabot, LICENSE MIT, version một
+  nguồn, systemd `StateDirectory`/`LogsDirectory`, Docker non-root + healthcheck.
+
+### 7.4 Kiểm chứng trong pass này
+
+```
+python -m unittest discover -s tests -t .   → Ran 311 tests — OK (163 s, gồm soak)
+ruff check .                                → All checks passed
+mypy --python-executable .venv/Scripts/python.exe tftp
+                                            → Success: no issues found in 20 source files
+coverage (TFTP_SKIP_SOAK=1)                 → TOTAL 82 % (gate 78 %)
+tftp-server --version / tftp-client --version → 1.1.0, OK sau khi cài lại editable
+```
+
+`mypy` của `.venv` bị Application Control chặn DLL mypyc trên máy dev, nên lần
+này chạy bằng Python toàn cục với `--python-executable` trỏ vào `.venv`; CI job
+`lint + type check` chạy đúng lệnh `mypy tftp`.
+
+### 7.5 Khoảng trống còn lại
+
+1. **Job interop chưa chạy thật trên GitHub Actions** (máy dev Windows không có
+   Linux/atftp) — cần một lần chạy CI để điền kết quả vào `docs/interop.md`.
+2. **Docker image/compose chưa build trên máy này** (không có Docker); Dockerfile
+   đã sửa non-root/healthcheck nhưng cần build thử trên Linux.
+3. **SSE chịu tải thật chưa đo**: giới hạn 4 stream + 5 phút/lần là cố ý để không
+   chiếm hết worker Waitress; cần kiểm với nhiều người dùng đồng thời.
+4. **Chưa có review bảo mật độc lập** và TFTP vẫn không có authentication (bản
+   chất giao thức).
+5. `plan.md` vẫn là kế hoạch gốc; các mục đã xong nên được đối chiếu lại trước
+   khi nộp báo cáo.
+
+### 7.6 Chấm lại
+
+| Tiêu chí | 2026-11-02 | 2026-11-24 |
+|---|---|---|
+| Architecture & code quality | 9 | 9.2 |
+| RFC correctness | 9 | 9.5 (thêm 7440; còn chờ interop) |
+| Test coverage | 9 | 9.5 (311 test, coverage gate) |
+| Production hardening | 8.5 | 9.2 (metrics/TLS/readyz/service) |
+| UX (GUI + web) | 7.5 | 8.7 (queue/cancel/SSE/file lifecycle) |
+| **Overall** | **9** | **9.5** (phạm vi LAN) |
 

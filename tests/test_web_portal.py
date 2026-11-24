@@ -6,6 +6,7 @@ import io
 import socket
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -58,7 +59,7 @@ class WebTest(unittest.TestCase):
         self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
 
     def test_guest_cannot_access_files_or_chat(self):
-        for path in ["/api/files", "/api/files/hello.txt", "/api/messages"]:
+        for path in ["/api/files", "/api/files/hello.txt", "/api/messages", "/api/stream"]:
             self.assertEqual(self.client.get(path).status_code, 401)
         for path in ["/api/files", "/api/messages"]:
             self.assertEqual(self.post(path, {}).status_code, 401)
@@ -162,6 +163,72 @@ class WebTest(unittest.TestCase):
         self.assertEqual(len(new), 1)
         self.assertEqual(new[0]["username"], "bobby")
 
+    def test_sse_stream_emits_messages_with_no_cache_headers(self):
+        self.register()
+        sent = self.post("/api/messages", {"body": "streamed hello"})
+        self.assertEqual(sent.status_code, 201, sent.json)
+        epoch = self.client.get("/api/messages").json["epoch"]
+        captured = {}
+
+        def read_chunk():
+            response = self.client.get(
+                f"/api/stream?after=0&epoch={epoch}", buffered=False)
+            captured["response"] = response
+            try:
+                captured["chunk"] = next(iter(response.response))
+            finally:
+                response.close()
+
+        worker = threading.Thread(target=read_chunk, daemon=True)
+        worker.start()
+        worker.join(2.0)
+        self.assertFalse(worker.is_alive(), "SSE stream did not emit within 2s")
+        response = captured["response"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/event-stream")
+        self.assertEqual(response.headers["Cache-Control"], "no-cache")
+        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+        chunk = captured["chunk"]
+        self.assertIsInstance(chunk, bytes)
+        text = chunk.decode("utf-8")
+        self.assertIn("event: messages", text)
+        self.assertIn("streamed hello", text)
+        self.assertIn("id: ", text)
+        semaphore = self.app.config["CHAT_STREAM_SEMAPHORE"]
+        self.assertTrue(semaphore.acquire(blocking=False))
+        semaphore.release()
+
+    def test_sse_stream_rejects_bad_cursors(self):
+        self.register()
+        for cursor in ["-1", "abc", "9" * 30]:
+            self.assertEqual(
+                self.client.get("/api/stream?after=" + cursor).status_code, 400)
+        self.assertEqual(self.client.get("/api/stream?epoch=abc").status_code, 400)
+
+    def test_login_attempts_are_audited_without_passwords(self):
+        self.register()
+        with self.assertLogs("tftp.web", level="INFO") as logs:
+            failed = self.post("/api/login",
+                               dict(username="alice", password="wrong-password-123"))
+        self.assertEqual(failed.status_code, 401)
+        output = "\n".join(logs.output)
+        self.assertIn("audit event=login", output)
+        self.assertIn("result=failed", output)
+        self.assertIn("user=alice", output)
+        self.assertIn("rid=", output)
+        self.assertIn("ip=127.0.0.1", output)
+        self.assertNotIn("wrong-password-123", output)
+
+        with self.assertLogs("tftp.web", level="INFO") as logs:
+            success = self.post("/api/login",
+                                dict(username="alice", password="password123"))
+        self.assertEqual(success.status_code, 200, success.json)
+        output = "\n".join(logs.output)
+        self.assertIn("audit event=login", output)
+        self.assertIn("result=ok", output)
+        self.assertIn("user=alice", output)
+        self.assertNotIn("password123", output)
+
     def test_chat_validation_limits_and_cursor(self):
         self.register()
         for body in [{"body": " "}, {"body": "a" * 2001}, {"body": 1}, []]:
@@ -244,12 +311,14 @@ class WebTest(unittest.TestCase):
             server.server.wait_for_idle()
             self.assertIn("up.txt", [item["name"] for item in
                                      self.client.get("/api/files").json["files"]])
-            with self.assertLogs("tftp.web", level="ERROR"):
-                duplicate = self.client.post(
-                    "/api/files", data={"file": (io.BytesIO(b"replacement"), "up.txt")},
-                    headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
-            self.assertEqual(duplicate.status_code, 409)
+            duplicate = self.client.post(
+                "/api/files", data={"file": (io.BytesIO(b"replacement"), "up.txt")},
+                headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
+            self.assertEqual(duplicate.status_code, 201, duplicate.json)
+            self.assertTrue(duplicate.json["renamed"])
+            self.assertEqual(duplicate.json["filename"], "up (2).txt")
             self.assertEqual(server.read("up.txt"), b"uploaded")
+            self.assertEqual(server.read("up (2).txt"), b"replacement")
             vietnamese = self.client.post(
                 "/api/files", data={"file": (io.BytesIO(b"vietnamese name"), "Đề tài.txt")},
                 headers={"X-CSRF-Token": self.csrf, "Origin": "http://localhost"})
@@ -274,7 +343,10 @@ class WebTest(unittest.TestCase):
                 response.close()
         self.assertEqual(list((self.config["DATA_DIR"] / "temporary").iterdir()), [])
 
-    def test_transfer_capacity_released_after_disconnect(self):
+    def test_slow_downloads_do_not_hold_transfer_slots(self):
+        # Trước đây slot chỉ được nhả trong `call_on_close`, nên 4 client đọc
+        # chậm (read(1)/s) giữ hết slot và mọi người khác nhận 503 dù TFTP
+        # đã truyền xong. Slot giờ chỉ tính pha TFTP, không tính pha stream.
         self.register()
         (self.config["FILE_ROOT"] / "data.txt").write_bytes(b"x")
 
@@ -287,10 +359,9 @@ class WebTest(unittest.TestCase):
                 for _ in range(4):
                     responses.append(self.client.get("/api/files/data.txt", buffered=False))
                     self.assertEqual(responses[-1].status_code, 200)
-                self.assertEqual(self.client.get("/api/files/data.txt").status_code, 503)
-                responses.pop().close()
-                responses.append(self.client.get("/api/files/data.txt", buffered=False))
-                self.assertEqual(responses[-1].status_code, 200)
+                extra = self.client.get("/api/files/data.txt", buffered=False)
+                self.assertEqual(extra.status_code, 200)
+                extra.close()
             finally:
                 for response in responses:
                     response.close()

@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
 except ImportError:  # pragma: no cover - thiếu extras [gui]
     raise unittest.SkipTest("cần PySide6 cho smoke test GUI") from None
@@ -41,13 +42,20 @@ class TestGuiSmoke(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self) -> None:
-        self.window = MainWindow()
+        # QSettings temp: test phải độc lập với cấu hình GUI của máy đang chạy
+        # (theme, host, thư mục gốc... được lưu từ lần dùng thật).
+        self._settings_dir = tempfile.TemporaryDirectory()
+        settings = QSettings(
+            str(Path(self._settings_dir.name) / "gui.ini"), QSettings.Format.IniFormat
+        )
+        self.window = MainWindow(settings)
         self.window.show()
         pump(self.app, 0.05)
 
     def tearDown(self) -> None:
         self.window.close()
         pump(self.app, 0.05)
+        self._settings_dir.cleanup()
 
     def _visible_blocks(self) -> int:
         block = self.window.log_view.document().begin()
@@ -68,15 +76,25 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertEqual(self.window.theme_name, "light")
 
     def test_log_filter_uses_levels(self) -> None:
-        self.window._on_log("DEBUG", "22:00:00 DEBUG   DATA 1")
-        self.window._on_log("INFO", "22:00:01 INFO    xong")
-        self.window._on_log("ERROR", "22:00:02 ERROR   hỏng")
+        # Formatter thật chỉ in "HH:MM:SS  nội dung" (không có chữ "INFO"),
+        # nên test phải dùng đúng định dạng đó. Bản cũ nhồi sẵn "INFO" vào
+        # text nên vẫn pass dù bộ lọc thực tế luôn cho ra rỗng.
+        self.window._on_log("DEBUG", "22:00:00  DATA 1")
+        self.window._on_log("INFO", "22:00:01  xong")
+        self.window._on_log("ERROR", "22:00:02  hỏng")
         pump(self.app)
         all_visible = self._visible_blocks()
+        # QTextEdit luôn có một block rỗng đầu tài liệu; nó chỉ hiện ở chế độ
+        # "Tất cả" nên không thể so bằng 3 cứng.
+        self.assertGreaterEqual(all_visible, 3)
         self.window.log_filter.setCurrentIndex(2)
         pump(self.app)
-        self.assertLess(self._visible_blocks(), all_visible)
-        self.assertGreaterEqual(self._visible_blocks(), 1)
+        self.assertEqual(self._visible_blocks(), 1)
+        self.window.log_filter.setCurrentIndex(1)
+        pump(self.app)
+        # Cửa sổ có sẵn một dòng log khởi động mức INFO, nên "thông tin" giữ
+        # tất cả trừ dòng ERROR.
+        self.assertEqual(self._visible_blocks(), all_visible - 1)
         self.window.log_filter.setCurrentIndex(0)
         pump(self.app)
         self.assertEqual(self._visible_blocks(), all_visible)

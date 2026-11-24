@@ -1,16 +1,23 @@
 [project]
 name = "trivial-file-transfer-protocol"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Ban cai dat TFTP hoan chinh theo RFC 1350 kem TFTP Option Extension (RFC 2347)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking",
+]
 dependencies = []
 
 [project.optional-dependencies]
 # GUI là tuỳ chọn: lõi server/client vẫn chỉ dùng thư viện chuẩn.
 gui = ["PySide6>=6.5"]
 web = ["Flask>=3.1,<4", "waitress>=3.0,<4"]
-dev = ["ruff>=0.5", "mypy>=1.5"]
+dev = ["ruff>=0.5", "mypy>=1.5", "coverage[toml]>=7.4", "pip-audit>=2.7"]
 
 [project.scripts]
 tftp-server = "tftp.tftp_server:main"
@@ -25,6 +32,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tftp*"]
+
+[tool.setuptools.dynamic]
+# Một nguồn duy nhất cho version: tftp/__init__.py:__version__.
+version = {attr = "tftp.__version__"}
 
 [tool.setuptools.package-data]
 "tftp.web_upload" = ["templates/*.html", "static/*.css", "static/*.js"]
@@ -51,3 +62,4 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 78

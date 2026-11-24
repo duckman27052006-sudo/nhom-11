@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS moderation (
     target_id INTEGER, target TEXT, detail TEXT NOT NULL DEFAULT '',
     created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS files (
+    name TEXT PRIMARY KEY,
+    uploader_id INTEGER NOT NULL REFERENCES users(id),
+    uploaded REAL NOT NULL,
+    size INTEGER NOT NULL
+);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('chat_epoch', '0');
 """
 
@@ -126,6 +132,39 @@ class Store:
         """Health check: mở DB và chạy một truy vấn tối thiểu."""
         with self.connect() as db:
             db.execute("SELECT 1").fetchone()
+
+    def record_file(self, name: str, uploader_id: int, size: int) -> None:
+        """Remember who uploaded a file; a re-upload refreshes the same row."""
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO files (name, uploader_id, uploaded, size) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET uploader_id=excluded.uploader_id,"
+                " uploaded=excluded.uploaded, size=excluded.size",
+                (name, uploader_id, time.time(), int(size)),
+            )
+
+    def file_owner(self, name: str):
+        """Upload record joined with the account name, or ``None`` when unrecorded."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT f.name, f.uploader_id, f.uploaded, f.size, u.username"
+                " FROM files f LEFT JOIN users u ON u.id=f.uploader_id WHERE f.name=?",
+                (name,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_file_record(self, name: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM files WHERE name=?", (name,))
+
+    def list_records(self) -> list[dict]:
+        """All upload records in name order; files without a row are simply absent."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT f.name, f.uploader_id, f.uploaded, f.size, u.username"
+                " FROM files f LEFT JOIN users u ON u.id=f.uploader_id ORDER BY f.name"
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def session(self, token: str):
         if not token or len(token) > 128:

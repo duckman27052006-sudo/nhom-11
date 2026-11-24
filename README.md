@@ -1,8 +1,8 @@
 # Trivial File Transfer Protocol (TFTP)
 
-Bản cài đặt TFTP theo **RFC 1350** và **TFTP Option Extension (RFC 2347)** viết
-bằng Python 3.10+. Lõi TFTP chỉ dùng thư viện chuẩn; GUI và web upload là các
-phần tùy chọn cần cài dependency riêng.
+Bản cài đặt TFTP theo **RFC 1350**, **TFTP Option Extension (RFC 2347)** và
+**Windowsize Option (RFC 7440)** viết bằng Python 3.10+. Lõi TFTP chỉ dùng thư
+viện chuẩn; GUI và web upload là các phần tùy chọn cần cài dependency riêng.
 
 | Thành phần | File | Nội dung |
 |---|---|---|
@@ -60,6 +60,12 @@ Bố cục chia **4 trang** để không dồn hết chức năng vào một mà
 Chi tiết ngôn ngữ thiết kế xem `GUI_REDESIGN.md`.
 
 Phím tắt: `Ctrl+L` xóa nhật ký · `Ctrl+K` dừng server.
+
+GUI nhớ cấu hình qua `QSettings` (host/port/root/blksize/timeout/retries/mode,
+theme, kích thước cửa sổ, đường dẫn tải/gửi gần nhất) nên mở lại không phải nhập
+tay. Trang **Truyền file** có **hàng đợi** (xếp thêm việc khi đang truyền), nút
+**Huỷ** dừng transfer hiện tại mà không đóng ứng dụng, và các ô bấm/drop zone
+nhận focus bàn phím (Enter/Space) cùng tên accessible cho trình đọc màn hình.
 
 Hiệu ứng (tất cả nằm gọn trong `tftp/gui/motion.py`): chuyển trang trôi nhẹ từ
 dưới lên, cửa sổ mờ dần khi mở, chấm trạng thái nhịp thở, thanh tiến trình
@@ -180,6 +186,7 @@ python -m tftp.tftp_gui
 | `--evict-oldest` | tắt | khi đầy quota thì **xoá file cũ nhất** để nhận upload |
 | `--max-transfer-seconds` | `3600` | thời gian tối đa một transfer, áp cho cả RRQ và WRQ (0 = không giới hạn) |
 | `--tid-port-range` | ngẫu nhiên | dải port TID, ví dụ `50000-50100` |
+| `--windowsize` | `1` | RFC 7440: số DATA gửi trước khi chờ ACK (1..64; 1 = RFC 1350) |
 | `--cleanup-temp-age` | `86400` | xóa file `.part` cũ hơn N giây khi khởi động |
 | `--allow-subdirs` | tắt | cho phép `incoming/file` trong root (mặc định chặn mọi `/`) |
 | `--max-requests-per-second` | `100` | giới hạn request/s chống flood |
@@ -215,6 +222,7 @@ python -m tftp.tftp_gui
 | `--remote` | tên file gốc | tên file trên server khi `--put` |
 | `--mode` | `octet` | `octet` (nhị phân) hoặc `netascii` |
 | `--blocksize` | `512` | kích thước khối mong muốn (8..65464) |
+| `--windowsize` | `1` | RFC 7440: số block gửi trước khi chờ ACK (1..64) |
 | `--timeout` | `5` | giây chờ |
 | `--retries` | `5` | số lần thử lại |
 | `--no-options` | tắt | giao thức thuần RFC 1350, blksize cố định 512 |
@@ -247,6 +255,10 @@ python -m tftp.tftp_client --server "[fe80::1%12]:6969" --family ipv6 --get samp
 - Mỗi phiên server tạo socket TID cùng họ địa chỉ với listener; reply luôn về
   đúng sockaddr (gồm scope ID) của client.
 - `dual` dùng hai socket riêng với `IPV6_V6ONLY=1`, không phụ thuộc mặc định OS.
+- `--windowsize N` bật RFC 7440: gửi tối đa N DATA trước khi chờ ACK, giảm hẳn
+  số lần dừng chờ round-trip trên link có RTT. Mặc định `1` = hành vi RFC 1350;
+  server trả giá trị ≤ giá trị client xin và không bao giờ vượt 64 block.
+  Benchmark tương đối: [`docs/benchmark.md`](docs/benchmark.md).
 - TFTP **không có xác thực/mã hóa**. Chỉ triển khai trong LAN/VLAN tin cậy, giới
   hạn nguồn bằng firewall/VPN và **không mở trực tiếp ra Internet**.
 - Firewall phải cho phép cả UDP 6969 **và dải TID** (`--tid-port-range`) từ
@@ -342,9 +354,12 @@ python -m unittest tests.test_soak -v    # chỉ soak / stress
 python -m unittest tests.test_metrics -v # chỉ registry metrics
 python -m unittest tests.test_net -v     # IPv4/IPv6, dual-stack, chính sách ghi
 python -m unittest tests.test_config -v  # cấu hình JSON + log rotation
+python -m unittest tests.test_windowsize -v  # RFC 7440: cửa sổ, mất gói cả 2 chiều
 
 ruff check .                             # lint
 python -m mypy tftp                      # type check toàn package (kể cả GUI)
+coverage run --source=tftp -m unittest discover -s tests -t . && coverage report  # coverage (cần [dev])
+bash scripts/interop.sh                  # tftpd-hpa + atftp (cần Linux/CI)
 ```
 
 Test tích hợp tự bật server trên một port ngẫu nhiên nên **không cần quyền admin**
@@ -388,6 +403,12 @@ và không xung đột với dịch vụ TFTP thật của hệ điều hành. C
 | 34 | WRQ + OACK | client gửi thẳng DATA 1, không gửi ACK 0 thừa (RFC 2347) |
 | 35 | dally ACK cuối | client gửi lặp DATA cuối vẫn được ACK lại (RFC 1350 §5) |
 | 36 | RTT metric | `exchange.rtt` không bao giờ ghi uptime của process |
+| 37 | windowsize | RFC 7440: OACK đúng, cửa sổ go-back-N, mất gói cả RRQ và WRQ |
+| 38 | chống flood gói rác | session có ngân sách gói không tiến triển + deadline; ERROR trả về bị rate-limit |
+| 39 | subdir ẩn | `--allow-subdirs` không đọc `.git/config`, `.env`, `x.part` |
+| 40 | lọc log GUI | bộ lọc mức dựa trên level thật, không dựa vào chuỗi trong text |
+| 41 | TLS/health web | proxy HTTPS tự bật `__Host-`+Secure+HSTS; `/livez` rẻ, `/readyz` sâu, `/metrics` |
+| 42 | dally dài hơn timeout | DATA cuối gửi lại sau đúng một `timeout` vẫn được ACK |
 
 Soak test nặng hơn bằng biến môi trường:
 
@@ -408,6 +429,11 @@ Mỗi bên đo: số phiên (bắt đầu / hoàn tất / timeout), số gói ti
 **số lần gửi lại**, byte thật, RTT và thời gian phiên với `p50/p95/p99`, số phiên
 đang chạy. Danh mục đầy đủ và cách tính tỉ lệ lỗi:
 [`docs/observability.md`](docs/observability.md).
+
+Cổng web xuất Prometheus text tại `/metrics` (quản trị viên, hoặc bearer token
+qua `--metrics-token`), đồng thời tách rõ:
+`/livez` chỉ kiểm SQLite (liveness rẻ) và `/readyz` kiểm cả TFTP (readiness).
+`/healthz` giữ nguyên hành vi cũ để không phá monitoring đã có.
 
 ## 8. Kiểm tra bằng Wireshark
 
@@ -437,7 +463,8 @@ Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 �
 
 ## 9. Đặc điểm đã triển khai
 
-- Lock-step: mỗi khối chờ ACK trước khi gửi khối kế tiếp.
+- Lock-step mặc định (1 block/ACK); `--windowsize N` bật cửa sổ RFC 7440 để
+  giảm số lần dừng chờ, kèm go-back-N khi mất gói.
 - Timeout + retransmission với giới hạn số lần thử.
 - TID riêng cho từng phiên, kiểm tra nguồn gói để chống lẫn dữ liệu giữa các client.
 - So khớp `(addr, filename, mode, options)` để phát hiện OS cấp lại cùng port
@@ -465,7 +492,16 @@ Bộ lọc hiển thị chuỗi: `RRQ → OACK → ACK 0 → DATA 1 → ACK 1 �
   dải TID, dọn `.part`; xem [`docs/operations.md`](docs/operations.md).
 - Cấu hình JSON strict + `--check-config`, log rotation; triển khai service và
   firewall mẫu tại [`docs/deployment.md`](docs/deployment.md).
-- Ma trận interop (chưa xác minh với `tftpd-hpa`): [`docs/interop.md`](docs/interop.md).
+- Metrics Prometheus qua `render_prometheus()` và `/metrics` của gateway; tách
+  `/livez` (SQLite) khỏi `/readyz` (SQLite + TFTP).
+- TLS an toàn hơn khi đặt sau reverse proxy: cookie `__Host-` + `Secure` tự bật,
+  HSTS, CSP/COOP/CORP/Permissions-Policy.
+- Benchmark tương đối blksize × windowsize: [`docs/benchmark.md`](docs/benchmark.md)
+  (`tools/benchmark.py`).
+- CI: Linux 3.10–3.14 + Windows, GUI offscreen, coverage ≥75 %, entry-point
+  smoke, soak riêng và job interop `tftpd-hpa`/`atftp` (`scripts/interop.sh`).
+- Ghi chú RFC 7440: [`docs/RFC-7440-notes.md`](docs/RFC-7440-notes.md).
+- Ma trận interop tự động hoá: [`docs/interop.md`](docs/interop.md).
 
 Chi tiết ghi chú chuẩn và các điểm dễ sai: [`docs/RFC-1350-notes.md`](docs/RFC-1350-notes.md).
 Số liệu vận hành: [`docs/observability.md`](docs/observability.md).

@@ -8,7 +8,16 @@ hành vẽ (input, bảng, checkbox) lấy màu từ `QPalette` của app.
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QResizeEvent
+from PySide6.QtGui import (
+    QColor,
+    QFocusEvent,
+    QFontMetrics,
+    QKeyEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -408,6 +417,11 @@ class ActionTile(Surface):
 
     def __init__(self, title: str, hint: str, icon: str = "") -> None:
         super().__init__(radius=RADIUS_TILE, hover=True)
+        # Ô lối tắt là hành động chính: nhận focus bàn phím và có tên cho
+        # trình đọc màn hình (Enter/Space kích hoạt như bấm chuột).
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(f"{title}. {hint}")
+        self.setAccessibleDescription(hint)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
@@ -440,6 +454,36 @@ class ActionTile(Surface):
         ):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        self.update()
+        super().focusOutEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self.hasFocus():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(theme.current_tokens()["primary"]), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(2.5, 2.5, -2.5, -2.5),
+            RADIUS_TILE,
+            RADIUS_TILE,
+        )
+        painter.end()
 
     def restyle(self) -> None:
         super().restyle()
@@ -1017,6 +1061,12 @@ class DropZone(QFrame):
         super().__init__()
         self.setAcceptDrops(True)
         self.setFixedHeight(58)
+        # Vùng thả cũng là một nút: Tab tới được, Enter/Space mở hộp chọn file.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Vùng kéo thả file để gửi lên server")
+        self.setAccessibleDescription(
+            "Kéo file vào đây, hoặc nhấn Enter/Space để chọn file từ đĩa"
+        )
         self.label = QLabel(text)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setFont(theme.font(8.5))
@@ -1028,13 +1078,20 @@ class DropZone(QFrame):
 
     def _style(self, active: bool) -> None:
         tokens = theme.current_tokens()
-        border = tokens["primary"] if active else tokens["border_strong"]
-        background = tokens["primary_soft"] if active else tokens["surface"]
+        highlighted = active or self.hasFocus()
+        border = tokens["primary"] if highlighted else tokens["border_strong"]
+        background = tokens["primary_soft"] if highlighted else tokens["surface"]
         self.setStyleSheet(
             f"QFrame {{ border: 1px dashed {border}; border-radius: {RADIUS_TILE}px;"
             f" background: {background}; }}"
         )
         self.label.setStyleSheet(f"color: {tokens['text_subtle']};")
+
+    def _choose_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file", "")
+        if path:
+            self.label.setText(path)
+            self.fileDropped.emit(path)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
@@ -1057,11 +1114,23 @@ class DropZone(QFrame):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         # Bấm vào vùng cũng mở hộp chọn file (không chỉ kéo–thả).
         if event.button() == Qt.MouseButton.LeftButton:
-            path, _ = QFileDialog.getOpenFileName(self, "Chọn file", "")
-            if path:
-                self.label.setText(path)
-                self.fileDropped.emit(path)
+            self._choose_file()
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self._choose_file()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        self._style(False)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        self._style(False)
+        super().focusOutEvent(event)
 
     def restyle(self) -> None:
         self._style(False)

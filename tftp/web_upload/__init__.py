@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import logging
 import re
 import secrets
@@ -11,17 +12,28 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, g, jsonify, render_template, request, send_file
+from flask import (
+    Flask,
+    Response,
+    g,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+)
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from .. import enable_utf8_console, tftp_errors
 from ..tftp_client import TftpClient
 from ..tftp_errors import TftpError
+from ..tftp_metrics import Metrics
 from ..tftp_net import format_endpoint, parse_host_port
 from ..web_store import (
     ADMIN,
@@ -36,9 +48,22 @@ from ..web_store import (
 LOG = logging.getLogger("tftp.web")
 COOKIE = "tftp_session"
 USERNAME = re.compile(r"[A-Za-z0-9_]{3,32}\Z")
+MAX_RENAME_ATTEMPTS = 9
+STREAM_INTERVAL = 0.8
+STREAM_HEARTBEAT = 15.0
+STREAM_MAX_SECONDS = 300.0
+STREAM_RECHECK_SECONDS = 5.0
 FORWARDED_HOST = re.compile(
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?\Z"
 )
+
+
+def renamed_candidate(name: str, attempt: int) -> str:
+    """`report.txt` -> `report (2).txt`; extension-less names get `name (2)`."""
+    stem, dot, extension = name.rpartition(".")
+    if dot and stem:
+        return f"{stem} ({attempt}).{extension}"
+    return f"{name} ({attempt})"
 
 
 class UploadConfigError(ValueError):
@@ -162,6 +187,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         COOKIE_SECURE=False, MAX_CONCURRENT_UPLOADS=4,
         ALLOWED_HOSTS=["localhost", "127.0.0.1", "::1"],
         HEALTH_CACHE_SECONDS=5.0, HEALTH_TIMEOUT=1.0,
+        METRICS_TOKEN="", MAX_CHAT_STREAMS=4,
     )
     app.config.update(config or {})
     overrides = dict(ALLOWED_NETWORKS=allowed_networks, TRUSTED_PROXIES=trusted_proxies,
@@ -173,6 +199,8 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         raise UploadConfigError("Địa chỉ hoặc cổng TFTP không hợp lệ.")
     if app.config["MAX_CONCURRENT_UPLOADS"] < 1:
         raise UploadConfigError("Số lượt truyền đồng thời phải lớn hơn 0.")
+    if app.config["MAX_CHAT_STREAMS"] < 1:
+        raise UploadConfigError("Số kết nối chat trực tiếp phải lớn hơn 0.")
     if app.config["ALLOWED_HOSTS"] is not None:
         if isinstance(app.config["ALLOWED_HOSTS"], str):
             raise UploadConfigError("ALLOWED_HOSTS phải là danh sách host.")
@@ -214,9 +242,18 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         LOG.info("Tài khoản đầu tiên nhận quyền quản trị: %s", store.bootstrap_admin)
     slots = threading.BoundedSemaphore(app.config["MAX_CONCURRENT_UPLOADS"])
     app.config["UPLOAD_SEMAPHORE"] = slots
+    chat_slots = threading.BoundedSemaphore(app.config["MAX_CHAT_STREAMS"])
+    app.config["CHAT_STREAM_SEMAPHORE"] = chat_slots
+    app.extensions["tftp_metrics"] = Metrics("tftp_web")
 
     def fail(message: str, status: int):
         return jsonify(error=message), status
+
+    def audit(event: str, **fields) -> None:
+        """One structured line per audited action; never pass passwords or chat bodies."""
+        detail = " ".join(f"{key}={value}" for key, value in fields.items())
+        LOG.info("audit event=%s rid=%s ip=%s%s", event, getattr(g, "rid", "-"),
+                 getattr(g, "client_ip", "-"), f" {detail}" if detail else "")
 
     def state_of(account):
         return store.state(account)
@@ -233,6 +270,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
 
     @app.before_request
     def protect():
+        g.rid = secrets.token_hex(4)
         allowed_hosts = app.config["ALLOWED_HOSTS"]
         if allowed_hosts is not None:
             raw_host = request.host
@@ -243,7 +281,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
                 except ValueError:
                     pass
             if trusted_host_key(hostname or "") not in allowed_hosts:
-                LOG.warning("từ chối Host %r từ %s", raw_host, request.remote_addr)
+                LOG.warning("từ chối Host %r từ %s rid=%s", raw_host, request.remote_addr, g.rid)
                 return fail("Địa chỉ máy chủ không được phép.", 400)
         if request.path not in {"/api/files", "/api/upload"}:
             request.max_content_length = 16 * 1024
@@ -261,7 +299,9 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         if not any(address in network for network in networks):
             LOG.warning("LAN ACL rejected client=%s path=%s", g.client_ip, request.path)
             return fail("Thiết bị không nằm trong mạng LAN được phép.", 403)
-        g.token = request.cookies.get(COOKIE, "")
+        g.token = request.cookies.get(COOKIE, "") or request.cookies.get(
+            "__Host-" + COOKIE, ""
+        )
         g.account = store.session(g.token)
         if g.account:
             g.state = store.state(g.account)
@@ -295,8 +335,24 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
-        if not request.path.startswith(app.static_url_path + "/"):
+        if response.mimetype == "text/event-stream":
+            response.headers["Cache-Control"] = "no-cache"
+            response.headers["X-Accel-Buffering"] = "no"
+        elif not request.path.startswith(app.static_url_path + "/"):
             response.headers["Cache-Control"] = "no-store"
+        else:
+            response.headers.setdefault("Cache-Control", "public, max-age=3600")
+        # Lớp phòng thủ bổ sung: tách process, chặn tài nguyên cross-origin,
+        # tắt API quyền không dùng. HSTS chỉ gửi khi thật sự chạy sau HTTPS.
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=(), payment=()"
+        )
+        if getattr(g, "public_origin", "").startswith("https://"):
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
         return response
 
     @app.errorhandler(HTTPException)
@@ -356,22 +412,61 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         )
 
     @app.get("/healthz")
-    def health():
+    @app.get("/readyz")
+    def readiness():
+        # Deep check (DB + TFTP). `/readyz` là tên chuẩn cho orchestrator;
+        # `/healthz` giữ nguyên để không phá monitoring đã có.
         now = time.monotonic()
         with health_lock:
             entry = health_cache["entry"]
             if entry is not None and now - entry[0] < app.config["HEALTH_CACHE_SECONDS"]:
                 return jsonify(entry[1]), entry[2]
-            body, status = health_report()
-            health_cache["entry"] = (now, body, status)
-            return jsonify(body), status
+        # Chạy probe NGOÀI lock: nếu giữ lock trong lúc RRQ tới TFTP hỏng,
+        # mọi liveness probe đồng thời đều xếp hàng sau nó.
+        body, status = health_report()
+        with health_lock:
+            entry = health_cache["entry"]
+            if entry is not None and entry[0] >= now:
+                return jsonify(entry[1]), entry[2]
+            health_cache["entry"] = (time.monotonic(), body, status)
+        return jsonify(body), status
+
+    @app.get("/livez")
+    def liveness():
+        """Liveness rẻ: chỉ mở SQLite. Không phụ thuộc TFTP đang chạy hay không."""
+        try:
+            store.ping()
+        except sqlite3.Error as exc:
+            LOG.warning("Liveness: database lỗi: %s", exc)
+            return jsonify(status="down", checks={"database": "error"}), 503
+        return jsonify(status="ok", checks={"database": "ok"}), 200
+
+    @app.get("/metrics")
+    def metrics_endpoint():
+        """Prometheus text format cho gateway (admin session hoặc bearer token)."""
+        token = app.config.get("METRICS_TOKEN") or ""
+        if token:
+            supplied = request.headers.get("Authorization", "")
+            if supplied.lower().startswith("bearer "):
+                supplied = supplied[7:].strip()
+            if not secrets.compare_digest(supplied.encode(), token.encode()):
+                return fail("Token số liệu không hợp lệ.", 401)
+        elif not (g.account and g.account.get("role") == ADMIN):
+            return fail("Chỉ quản trị viên xem được số liệu.", 403)
+        text = app.extensions["tftp_metrics"].render_prometheus("tftp_web")
+        return Response(text, mimetype="text/plain; version=0.0.4; charset=utf-8")
 
     def session_response(user_id=None):
         token, csrf = store.new_session(g.token, user_id)
         account = store.session(token)
         response = jsonify(session_payload(account, csrf))
-        response.set_cookie(COOKIE, token, max_age=SESSION_SECONDS, httponly=True,
-                            samesite="Lax", secure=app.config["COOKIE_SECURE"])
+        # TLS do reverse proxy: tự bật Secure + tiền tố __Host- khi origin là
+        # HTTPS, kể cả khi quên --secure-cookie. __Host- buộc Path=/ và không
+        # Domain nên chặn cookie injection từ subdomain.
+        secure = bool(app.config["COOKIE_SECURE"]) or g.public_origin.startswith("https://")
+        cookie_name = ("__Host-" + COOKIE) if secure else COOKIE
+        response.set_cookie(cookie_name, token, max_age=SESSION_SECONDS, httponly=True,
+                            samesite="Lax", secure=secure, path="/")
         return response
 
     @app.get("/api/session")
@@ -397,34 +492,45 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
     @app.post("/api/register")
     def register():
         if not store.permit("register:" + g.client_ip, 5):
+            audit("register", result="rate_limited")
             return fail("Đăng ký quá nhiều lần. Hãy đợi một phút.", 429)
         values = credentials()
         if values is None:
+            audit("register", result="rejected", reason="invalid")
             return fail("Tên tài khoản: 3–32 chữ, số hoặc _. Mật khẩu: 8–128 ký tự.", 400)
         try:
-            user_id, _ = store.register(*values)
+            user_id, role = store.register(*values)
         except sqlite3.IntegrityError:
+            audit("register", result="failed", user=values[0], reason="duplicate")
             return fail("Tên tài khoản đã được sử dụng.", 409)
+        audit("register", result="ok", user=values[0], role=role)
         return session_response(user_id)
 
     @app.post("/api/login")
     def login():
         if not store.permit("login:" + g.client_ip, 10):
+            audit("login", result="rate_limited")
             return fail("Đăng nhập quá nhiều lần. Hãy đợi một phút.", 429)
         values = credentials()
         if values is None:
+            audit("login", result="rejected", reason="invalid")
             return fail("Tên tài khoản hoặc mật khẩu không đúng.", 401)
         user_id = store.authenticate(*values)
         if user_id is None:
+            audit("login", result="failed", user=values[0])
             return fail("Tên tài khoản hoặc mật khẩu không đúng.", 401)
         state = store.state(store.user(user_id))
         if state["banned"]:
+            audit("login", result="banned", user=values[0])
             reason = f" Lý do: {state['ban_reason']}." if state["ban_reason"] else ""
             return fail(f"Tài khoản đã bị khóa.{reason}", 403)
+        audit("login", result="ok", user=values[0])
         return session_response(user_id)
 
     @app.post("/api/logout")
     def logout():
+        if g.account and g.account.get("user_id"):
+            audit("logout", user=g.account["username"])
         return session_response()
 
     def file_path(name: str, *, allow_unicode: bool = False):
@@ -444,19 +550,29 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
 
     @app.get("/api/files")
     def files():
+        records = {record["name"]: record for record in store.list_records()}
+        me = g.account["user_id"] if g.account else None
+        admin = bool(g.account) and state_of(g.account)["role"] == ADMIN
         items = []
         for target in root.iterdir():
             try:
                 if file_path(target.name) is not None and target.is_file():
                     stat = target.stat()
-                    items.append(dict(name=target.name, size=stat.st_size, modified=stat.st_mtime))
+                    record = records.get(target.name) or {}
+                    items.append(dict(
+                        name=target.name, size=stat.st_size, modified=stat.st_mtime,
+                        owner=record.get("username"),
+                        can_delete=admin or (me is not None
+                                             and record.get("uploader_id") == me),
+                    ))
             except OSError:
                 continue
         return jsonify(files=sorted(items, key=lambda item: item["name"].casefold()))
 
     def client():
         return TftpClient(app.config["TFTP_HOST"], app.config["TFTP_PORT"],
-                          timeout=app.config["TFTP_TIMEOUT"], retries=app.config["TFTP_RETRIES"])
+                          timeout=app.config["TFTP_TIMEOUT"], retries=app.config["TFTP_RETRIES"],
+                          metrics=app.extensions["tftp_metrics"])
 
     def check_size(current, total):
         if current > app.config["MAX_FILE_SIZE"] or (total or 0) > app.config["MAX_FILE_SIZE"]:
@@ -481,34 +597,99 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             return fail("File vượt quá dung lượng cho phép.", 413)
         if not slots.acquire(blocking=False):
             return fail("Máy chủ đang truyền nhiều file. Hãy thử lại sau.", 503)
+        slot_held = True
         temporary = None
+
+        def release_slot() -> None:
+            nonlocal slot_held
+            if slot_held:
+                slot_held = False
+                slots.release()
+
         try:
             temporary = tempfile.TemporaryDirectory(dir=temporary_root)
             local = Path(temporary.name) / "download"
             client().download(name, str(local), progress=check_size)
+            # Slot chỉ cần cho pha TFTP: nhả trước khi stream về trình duyệt,
+            # nếu không 4 client đọc chậm là khoá toàn bộ portal (503).
+            release_slot()
             response = send_file(local, as_attachment=True, download_name=name,
-                                 mimetype="application/octet-stream", conditional=False)
+                                 mimetype="application/octet-stream", conditional=True)
             # Ensure the response closes its file before cleanup, including client disconnects.
             response.direct_passthrough = False
             response.call_on_close(temporary.cleanup)
-            response.call_on_close(slots.release)
+            audit("download", result="ok", file=name, size=target.stat().st_size)
             return response
         except ValueError:
             if temporary:
                 temporary.cleanup()
-            slots.release()
+            release_slot()
+            audit("download", result="failed", file=name, reason="too_large")
             return fail("File vượt quá dung lượng cho phép.", 413)
         except (OSError, TftpError):
             if temporary:
                 temporary.cleanup()
-            slots.release()
+            release_slot()
             LOG.exception("TFTP download failed")
+            audit("download", result="failed", file=name, reason="tftp")
             return fail("Không thể tải file từ TFTP. Kiểm tra máy chủ và thử lại.", 502)
         except BaseException:
             if temporary:
                 temporary.cleanup()
-            slots.release()
+            release_slot()
             raise
+
+    @app.delete("/api/files/<name>")
+    def delete_file(name):
+        target = file_path(name)
+        if target is None:
+            return fail("Tên file không hợp lệ. TFTP yêu cầu tên không dấu (ASCII).", 400)
+        if not target.is_file():
+            audit("delete_file", result="missing", file=name)
+            return fail("File không còn tồn tại.", 404)
+        owner = store.file_owner(name)
+        admin = state_of(g.account)["role"] == ADMIN
+        owner_id = owner["uploader_id"] if owner else None
+        if not admin and owner_id != g.account["user_id"]:
+            audit("delete_file", result="denied", file=name)
+            return fail("Bạn chỉ có thể xóa tệp do mình tải lên.", 403)
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            store.delete_file_record(name)
+            audit("delete_file", result="missing", file=name)
+            return fail("File không còn tồn tại.", 404)
+        except OSError:
+            LOG.exception("Deleting %s failed", name)
+            audit("delete_file", result="failed", file=name)
+            return fail("Không thể xóa tệp. Hãy thử lại.", 500)
+        store.delete_file_record(name)
+        record("delete_file", owner_id, name,
+               "Xóa tệp đã chia sẻ" + (f" của {owner['username']}" if owner else ""))
+        audit("delete_file", result="ok", file=name, owner=owner["username"] if owner else "-")
+        return jsonify(deleted=name, message="Đã xóa tệp.")
+
+    def upload_with_retry(local: Path, remote: str) -> tuple[str, bool]:
+        """Upload once; a TFTP "file exists" collision retries numbered names."""
+        try:
+            client().upload(str(local), remote)
+            return remote, False
+        except TftpError as exc:
+            if exc.code != tftp_errors.ERR_FILE_EXISTS:
+                raise
+            collision = exc
+        for attempt in range(2, MAX_RENAME_ATTEMPTS + 2):
+            candidate = renamed_candidate(remote, attempt)
+            if candidate == remote or file_path(candidate) is None:
+                continue
+            try:
+                client().upload(str(local), candidate)
+                return candidate, True
+            except TftpError as retry:
+                if retry.code != tftp_errors.ERR_FILE_EXISTS:
+                    raise
+                collision = retry
+        raise collision
 
     @app.post("/api/files")
     @app.post("/api/upload")
@@ -534,10 +715,17 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
                         count += len(chunk)
                         check_size(count, None)
                         handle.write(chunk)
-                client().upload(str(local), remote)
-            LOG.info("Upload from %s by %s", g.client_ip, g.account["username"])
-            return jsonify(message="Đã gửi file thành công.", filename=remote, size=count), 201
+                final, renamed = upload_with_retry(local, remote)
+            store.record_file(final, g.account["user_id"], count)
+            audit("upload", result="ok", file=final, size=count, renamed=renamed)
+            message = "Đã gửi file thành công."
+            if renamed:
+                message = (f"Đã gửi file thành công. Máy chủ đã lưu thành {final} "
+                           "vì tên cũ đã tồn tại.")
+            return jsonify(message=message, filename=final, size=count,
+                           renamed=renamed), 201
         except ValueError:
+            audit("upload", result="failed", file=remote, reason="too_large")
             return fail("File vượt quá dung lượng cho phép.", 413)
         except TftpError as exc:
             status = 504 if isinstance(exc, tftp_errors.TftpTimeout) else {
@@ -548,14 +736,17 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             messages = {504: unavailable_message(),
                         403: "TFTP server từ chối quyền ghi file.",
                         507: "TFTP server không còn đủ dung lượng.",
-                        409: "TFTP server đã có file trùng tên. Hãy đổi tên file."}
+                        409: "TFTP server đã có file trùng tên và không thể đổi tên tự động."}
             LOG.exception("TFTP upload failed")
+            audit("upload", result="failed", file=remote, status=status, reason="tftp")
             return fail(messages.get(status, "TFTP server không thể tiếp nhận file."), status)
         except (ConnectionError, TimeoutError):
             LOG.exception("TFTP connection failed")
+            audit("upload", result="failed", file=remote, reason="connection")
             return fail(unavailable_message(), 504)
         except OSError:
             LOG.exception("TFTP upload failed")
+            audit("upload", result="failed", file=remote, reason="os")
             return fail("Không thể gửi file. Kiểm tra TFTP và chính sách ghi đè.", 502)
         finally:
             slots.release()
@@ -596,6 +787,15 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             return view(*args, **kwargs)
         return wrapper
 
+    def chat_snapshot(after: int | None, known_epoch: int | None) -> dict:
+        epoch = store.epoch()
+        # A moderation action deleted messages, so the cursor is no longer trustworthy.
+        reset = after is not None and known_epoch is not None and known_epoch != epoch
+        rows = store.messages(None if reset or after is None else after)
+        state = state_of(g.account)
+        return dict(messages=rows, epoch=epoch, reset=reset, chat=state,
+                    me=g.account["user_id"], can_moderate=state["role"] == ADMIN)
+
     @app.get("/api/messages")
     def messages():
         after = request.args.get("after")
@@ -604,13 +804,92 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         known = request.args.get("epoch")
         if known is not None and not re.fullmatch(r"[0-9]{1,18}", known):
             return fail("Mốc trò chuyện không hợp lệ.", 400)
-        epoch = store.epoch()
-        # A moderation action deleted messages, so the cursor is no longer trustworthy.
-        reset = after is not None and known is not None and int(known) != epoch
-        rows = store.messages(None if reset or after is None else int(after))
-        state = state_of(g.account)
-        return jsonify(messages=rows, epoch=epoch, reset=reset, chat=state,
-                       me=g.account["user_id"], can_moderate=state["role"] == ADMIN)
+        return jsonify(chat_snapshot(
+            None if after is None else int(after),
+            None if known is None else int(known),
+        ))
+
+    def sse_frame(event: str, payload: dict, event_id: int | None = None) -> bytes:
+        lines = []
+        if event_id is not None:
+            lines.append(f"id: {event_id}")
+        lines.append(f"event: {event}")
+        lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return ("\n".join(lines) + "\n\n").encode()
+
+    @app.get("/api/stream")
+    def stream():
+        """Server-sent events for chat; `/api/messages` remains the polling fallback."""
+        after_raw = request.args.get("after")
+        if after_raw is None:
+            after_raw = request.headers.get("Last-Event-ID")
+        if after_raw is not None and not re.fullmatch(r"[0-9]{1,18}", after_raw):
+            return fail("Mốc tin nhắn không hợp lệ.", 400)
+        known_raw = request.args.get("epoch")
+        if known_raw is not None and not re.fullmatch(r"[0-9]{1,18}", known_raw):
+            return fail("Mốc trò chuyện không hợp lệ.", 400)
+        after = None if after_raw is None else int(after_raw)
+        known = None if known_raw is None else int(known_raw)
+        initial = chat_snapshot(after, known)
+        rows = initial["messages"]
+        cursor = rows[-1]["id"] if rows else (after or 0)
+        if not chat_slots.acquire(blocking=False):
+            return fail("Máy chủ đang có nhiều kết nối chat trực tiếp. Hãy tải lại trang.", 503)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                chat_slots.release()
+
+        def generate() -> Iterator[bytes]:
+            started = time.monotonic()
+            last_event = started
+            next_check = started
+            current = initial
+            position = cursor
+            try:
+                yield sse_frame("messages", current, position)
+                while time.monotonic() - started < STREAM_MAX_SECONDS:
+                    time.sleep(STREAM_INTERVAL)
+                    now = time.monotonic()
+                    if now >= next_check:
+                        next_check = now + STREAM_RECHECK_SECONDS
+                        account = store.session(g.token)
+                        state = store.state(account) if account else None
+                        if (not account or not account.get("user_id")
+                                or not state or state["banned"]):
+                            yield sse_frame("expire", {})
+                            return
+                        if state != current["chat"]:
+                            yield sse_frame("chat", {"chat": state,
+                                                     "can_moderate": state["role"] == ADMIN})
+                            current["chat"] = state
+                    epoch = store.epoch()
+                    if epoch != current["epoch"]:
+                        current = chat_snapshot(None, None)
+                        current["reset"] = True
+                        batch = current["messages"]
+                        position = batch[-1]["id"] if batch else 0
+                        yield sse_frame("messages", current, position)
+                        last_event = time.monotonic()
+                        continue
+                    batch = store.messages(position)
+                    if batch:
+                        position = batch[-1]["id"]
+                        yield sse_frame("messages", {"messages": batch, "epoch": epoch,
+                                                     "reset": False}, position)
+                        last_event = time.monotonic()
+                    elif time.monotonic() - last_event >= STREAM_HEARTBEAT:
+                        yield b": keep-alive\n\n"
+                        last_event = time.monotonic()
+            finally:
+                release()
+
+        response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+        response.call_on_close(release)
+        return response
 
     @app.post("/api/messages")
     def send_message():
@@ -638,6 +917,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
             return fail(str(exc), 403)
         if admin:
             record("delete", result["user_id"], result["username"], f"Xóa tin nhắn #{message_id}")
+        audit("delete_message", message_id=message_id, actor="admin" if admin else "owner")
         return jsonify(deleted=message_id, message="Đã xóa tin nhắn.")
 
     @app.delete("/api/messages")
@@ -661,6 +941,7 @@ def create_app(config: dict | None = None, *, allowed_networks: list[str] | None
         detail += f" · {result['deleted']} tin nhắn"
         record("purge", int(raw_user) if scope == "user" and raw_user else None,
                result["username"] if scope == "user" else "phòng chat chung", detail)
+        audit("purge_messages", scope=scope, deleted=result["deleted"])
         return jsonify(**result, message=detail)
 
     @app.get("/api/admin/overview")
@@ -749,6 +1030,8 @@ def main(argv=None) -> int:
     parser.add_argument("--tftp-server", default="127.0.0.1:6969")
     parser.add_argument("--max-file-size", type=int, default=100, help="MiB mỗi file")
     parser.add_argument("--secure-cookie", action="store_true", help="Chỉ bật sau HTTPS proxy")
+    parser.add_argument("--metrics-token", default="",
+                        help="Bearer token cho /metrics (mặc định: chỉ admin đã đăng nhập)")
     parser.add_argument("--trusted-host", action="append", default=[], metavar="HOST",
                         help="Host header được phép thêm (tên miền nội bộ); lặp lại được")
     parser.add_argument("--max-concurrent-uploads", type=int, default=4)
@@ -772,7 +1055,8 @@ def main(argv=None) -> int:
                               MAX_CONCURRENT_UPLOADS=args.max_concurrent_uploads,
                               ALLOWED_HOSTS=allowed_hosts,
                               TRUSTED_PROXIES=args.trusted_proxy or [],
-                              COOKIE_SECURE=args.secure_cookie))
+                              COOKIE_SECURE=args.secure_cookie,
+                              METRICS_TOKEN=args.metrics_token))
         if args.admin:
             store = app.extensions["web_store"]
             target = store.user_by_name(args.admin.strip())
@@ -790,6 +1074,7 @@ def main(argv=None) -> int:
         LOG.info("Tin cậy X-Forwarded-* từ: %s", ", ".join(args.trusted_proxy))
     serve(app, host=str(host), port=args.port, threads=args.threads,
           max_request_body_size=app.config["MAX_CONTENT_LENGTH"],
+          channel_timeout=120,
           ipv4=host.version == 4, ipv6=host.version == 6,
           # Trusted-proxy handling lives in create_app and validates the socket peer,
           # so Waitress must not strip forwarded headers before Flask sees them.

@@ -74,7 +74,14 @@ def next_block(block: int) -> int:
 OPTION_BLKSIZE = "blksize"
 OPTION_TIMEOUT = "timeout"
 OPTION_TSIZE = "tsize"
-OPTION_NAMES = (OPTION_BLKSIZE, OPTION_TIMEOUT, OPTION_TSIZE)
+OPTION_WINDOWSIZE = "windowsize"
+OPTION_NAMES = (OPTION_BLKSIZE, OPTION_TIMEOUT, OPTION_TSIZE, OPTION_WINDOWSIZE)
+
+# RFC 7440 cho phép 1..65535. Project giới hạn 64 block mỗi cửa sổ: đủ để lấp
+# đầy băng thông LAN (64 × 1468 ≈ 92 KiB in-flight) mà không cần buffer ACK
+# khổng lồ trên socket. Client xin lớn hơn sẽ được server trả giá trị nhỏ hơn.
+MIN_WINDOWSIZE = 1
+MAX_WINDOWSIZE = 64
 
 TRANSFER_MODES = ("netascii", "octet", "mail")
 

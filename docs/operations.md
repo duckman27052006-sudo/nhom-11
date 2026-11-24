@@ -33,6 +33,10 @@ dừng. Các nhóm chính:
 | Lỗi | `errors.sent.<code>`, `errors.unhandled`, `sessions.transfer_timeout` |
 | Tài nguyên | `sessions.active`, `writes.active` |
 
+Gateway web xuất cùng bộ số liệu ở định dạng Prometheus tại `/metrics` (admin
+session hoặc `--metrics-token`), kèm `/livez` và `/readyz`. Xem
+[`observability.md`](observability.md) để cấu hình scrape và cảnh báo.
+
 Cảnh báo nên đặt khi:
 
 - `requests.rate_limited`/`requests.overloaded` tăng liên tục.
@@ -44,9 +48,10 @@ Cảnh báo nên đặt khi:
 ## 3. File tạm và dữ liệu
 
 - Upload ghi vào `.<tên>.<random>.part` trong cùng thư mục đích, `fsync`, rồi
-  `os.replace` (nếu cho ghi đè) hoặc `os.link` + unlink (mặc định không ghi đè).
-- Khi không cho ghi đè, nếu filesystem không hỗ trợ tạo hard link nguyên tử thì
-  transfer sẽ thất bại và file đích được giữ nguyên; không fallback sang replace.
+  `os.replace` (nếu cho ghi đè) hoặc commit không ghi đè: hard link khi
+  filesystem hỗ trợ, fallback `O_EXCL` + copy trên FAT32/exFAT.
+- Khi không cho ghi đè và file đích đã tồn tại, transfer thất bại với `ERROR 6`
+  và file đích được giữ nguyên.
 - Lỗi/timeout xóa `.part` trong `finally`.
 - Khi khởi động, server xóa `.part` cũ hơn `--cleanup-temp-age` giây.
 - Backup: sao lưu thư mục root và config theo lịch; kiểm tra restore định kỳ.
@@ -75,6 +80,8 @@ Cảnh báo nên đặt khi:
 | `ERROR 6` | client ghi file đã tồn tại; đổi tên hoặc bật `--overwrite` có kiểm soát |
 | `ERROR 3` | kiểm tra đĩa, `max_file_size`, quota root |
 | Upload xong nhưng thiếu file | kiểm tra log lỗi ghi/fsync, quyền thư mục đích |
+| Tốc độ thấp dù LAN nhanh | tăng `--blksize` (1468/8192) và bật `--windowsize 4-8` ở cả hai đầu; xem `docs/benchmark.md` |
+| `ERROR 8` | option không thương lượng được: kiểm tra `blksize` 8..65464, `windowsize` 1..64 |
 | Server không khởi động | chạy `--check-config`; xem lỗi bind/permission/log |
 | IPv6 không kết nối | kiểm tra `--family`, route, zone link-local, firewall IPv6 |
 | Nghi ngờ lạm dụng | giảm `--max-clients`, `--max-requests-per-second`, siết firewall, dừng dịch vụ |

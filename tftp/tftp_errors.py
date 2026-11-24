@@ -90,6 +90,17 @@ class TftpTimeout(TftpError):
         super().__init__(message, code=ERR_NOT_DEFINED)
 
 
+class TftpCancelled(TftpError):
+    """Transfer bị hủy theo yêu cầu của người dùng, không phải lỗi mạng.
+
+    Cố ý **không** kế thừa `TftpTimeout`: nhánh fallback sang địa chỉ DNS kế
+    tiếp chỉ dành cho timeout thật, còn hủy thì phải dừng ngay lập tức.
+    """
+
+    def __init__(self, message: str = "đã hủy truyền theo yêu cầu") -> None:
+        super().__init__(message, code=ERR_NOT_DEFINED)
+
+
 class TftpRemoteError(TftpError):
     """Phía đối diện (server/client) gửi về gói ERROR."""
 

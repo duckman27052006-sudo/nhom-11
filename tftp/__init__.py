@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULT_PORT = 6969
 WELL_KNOWN_PORT = 69

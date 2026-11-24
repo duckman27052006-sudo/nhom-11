@@ -59,7 +59,9 @@ from .tftp_packet import (
     MAX_DATAGRAM,
     MAX_FILENAME,
     MAX_STALE_PACKETS,
+    MAX_WINDOWSIZE,
     MIN_BLKSIZE,
+    MIN_WINDOWSIZE,
     OACK,
     OP_ACK,
     OP_DATA,
@@ -68,6 +70,7 @@ from .tftp_packet import (
     OPTION_NAMES,
     OPTION_TIMEOUT,
     OPTION_TSIZE,
+    OPTION_WINDOWSIZE,
     RRQ,
     WRQ,
     NetasciiDecoder,
@@ -101,6 +104,26 @@ DEFAULT_TID_PORT_RANGE: tuple[int, int] | None = None
 FINAL_ACK_DALLY = 1.0
 """Cửa sổ giữ TID sau ACK cuối của WRQ để nhận lại DATA cuối bị gửi lặp
 (RFC 1350 §5). Bị cắt thêm bởi `timeout` đã thương lượng; đặt 0 để tắt."""
+
+MAX_DALLY_SECONDS = 10.0
+"""Trần cửa sổ dally: `timeout` có thể thương lượng tới 255 s, giữ TID lâu
+như vậy sẽ treo hàng trăm socket. 10 s đủ cho mọi timeout thực tế trên LAN."""
+
+ERROR_REPLIES_PER_SECOND = 20
+"""Số ERROR tối đa mỗi giây cho một IP khi gói đến không phải RRQ/WRQ hợp lệ.
+Mỗi gói rác 4 byte sinh một ERROR ~35 byte, nên phải chặn khuếch đại."""
+
+QUOTA_RECHECK_SECONDS = 30.0
+"""Chu kỳ đi lại cây root để đồng bộ cache dung lượng (file thay đổi ngoài
+server). Giữa hai lần, cache được cập nhật tăng/giảm khi commit/evict."""
+
+_MAX_ERROR_WINDOWS = 4096
+
+TID_RANDOM_ATTEMPTS = 64
+TID_SCAN_ATTEMPTS = 256
+"""Cấp phát TID có giới hạn: dải 1..65535 từng bị dựng thành list rồi shuffle
+**mỗi session** (65 535 phần tử) và khi cạn thì bind-fail toàn dải ngay trong
+dispatcher. Giờ thử ngẫu nhiên trước, rồi quét có trần."""
 
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$"}
@@ -147,6 +170,30 @@ def is_servable_name(filename: str) -> bool:
     if base.split(".")[0].lower() in _WINDOWS_RESERVED:
         return False
     return True
+
+
+def _is_valid_path_component(part: str) -> bool:
+    """Kiểm tra **từng** thành phần đường dẫn khi bật ``--allow-subdirs``.
+
+    `is_servable_name` chỉ nhìn basename, nên trước đây ``.git/config`` hay
+    ``incoming/.env`` lọt qua: basename hợp lệ nhưng thư mục/file ẩn thì không
+    được phép phục vụ. Hàm này áp đúng các luật đó cho mọi component.
+    """
+    if not part or part in (".", ".."):
+        return False
+    if not part.isascii():
+        return False
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in part):
+        return False
+    if any(ch in part for ch in '<>:"|?*'):
+        return False
+    if part.endswith((" ", ".")):
+        return False
+    if part.startswith("."):
+        return False
+    if part.lower().endswith(".part"):
+        return False
+    return part.split(".")[0].lower() not in _WINDOWS_RESERVED
 
 # Giữ alias để code cũ vẫn import được.
 __all__ = ["TftpServer", "Session", "MAX_STALE_PACKETS"]
@@ -203,6 +250,7 @@ class Session(threading.Thread):
         self.local_addr = local_addr
         self.request = request
         self.blksize = DEFAULT_BLKSIZE
+        self.windowsize = 1
         self.timeout = server.timeout
         self.retries = server.retries
         self._closed = threading.Event()
@@ -210,6 +258,8 @@ class Session(threading.Thread):
         self._notify_w: socket.socket | None = None
         self.sock: socket.socket | None = None
         self.local_port = 0
+        self.deadline: float | None = None
+        """Hạn tổng của transfer (từ `max_transfer_seconds`), kiểm cả trong `_recv`."""
         self._opened_at = time.monotonic()
         self._first_packet_at: float | None = None
         try:
@@ -359,7 +409,16 @@ class Session(threading.Thread):
         """Chờ một gói tin hợp lệ. Trả về packet, SESSION_REPLAY hoặc SESSION_TIMEOUT."""
         if self.sock is None or self._notify_r is None:
             return SESSION_TIMEOUT
+        # Ngân sách gói không tiến triển: một client gửi rác đều đặn (hoặc kẻ
+        # tấn công đoán TID) không được giữ thread/phiên sống mãi. Mỗi vòng lặp
+        # `select` lại có timeout mới, nên nếu chỉ dựa vào timeout thì phiên
+        # không bao giờ hết hạn.
+        stale = MAX_STALE_PACKETS
         while True:
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                raise tftp_errors.TftpTimeout(
+                    "vượt quá thời gian tổng cho phép của transfer"
+                )
             try:
                 readable, _, _ = select.select([self.sock, self._notify_r], [], [], self.timeout)
             except (OSError, ValueError):
@@ -382,6 +441,9 @@ class Session(threading.Thread):
             if address_key(source) != self.client_key:
                 self.metrics.incr("packets.foreign_tid")
                 self.log.warning("bỏ qua gói từ TID không xác định %s", format_sockaddr(source))
+                stale -= 1
+                if stale < 0:
+                    return SESSION_TIMEOUT
                 continue
             self.metrics.incr("packets.received")
             self.metrics.incr("bytes.received", len(raw))
@@ -390,6 +452,9 @@ class Session(threading.Thread):
             except tftp_errors.TftpError as exc:
                 self.metrics.incr("packets.malformed")
                 self._send_error(exc.code, str(exc))
+                stale -= 1
+                if stale < 0:
+                    return SESSION_TIMEOUT
                 continue
             self.log.debug("<- %s", describe(packet))
             if isinstance(packet, ERROR):
@@ -398,6 +463,9 @@ class Session(threading.Thread):
                 waiting = "/".join(describe_of(op) for op in accept_ops)
                 self.metrics.incr("packets.unexpected")
                 self.log.warning("bỏ qua %s, đang chờ %s", describe(packet), waiting)
+                stale -= 1
+                if stale < 0:
+                    return SESSION_TIMEOUT
                 continue
             return packet
 
@@ -479,6 +547,8 @@ class Session(threading.Thread):
             self.blksize = values[OPTION_BLKSIZE]
         if OPTION_TIMEOUT in values:
             self.timeout = max(MIN_SESSION_TIMEOUT, float(clamp_timeout(values[OPTION_TIMEOUT])))
+        if OPTION_WINDOWSIZE in values:
+            self.windowsize = max(MIN_WINDOWSIZE, int(values[OPTION_WINDOWSIZE]))
         return accepted
 
     # -------------------------------------------------------------- RRQ: server gửi ---
@@ -534,6 +604,7 @@ class Session(threading.Thread):
                 if self.server.max_transfer_seconds is not None
                 else None
             )
+            self.deadline = deadline
             net_reader = (
                 NetasciiReader(handle, self.blksize) if request.mode == "netascii" else None
             )
@@ -545,6 +616,12 @@ class Session(threading.Thread):
                     return handle.read(self.blksize)
                 except OSError as exc:
                     raise tftp_errors.TftpAccessViolation(f"đọc file thất bại: {exc}") from exc
+
+            if accepted and self.windowsize > 1:
+                self._serve_read_windowed(
+                    read_fn, request.filename, total, accepted, deadline, started
+                )
+                return
 
             try:
                 if accepted:
@@ -608,6 +685,86 @@ class Session(threading.Thread):
                         pass
                 raise
 
+    def _serve_read_windowed(
+        self,
+        read_fn: Callable[[], bytes],
+        filename: str,
+        total: int,
+        accepted: dict[str, str],
+        deadline: float | None,
+        started: float,
+    ) -> None:
+        """Gửi file theo RFC 7440: tối đa `windowsize` DATA trước khi chờ ACK.
+
+        Chỉ phía **gửi** cần cửa sổ. Phía nhận của project ACK từng block —
+        ACK cho block k là ACK luỹ tiến hợp lệ, nên vẫn đầy đủ tương thích cả
+        hai chiều mà không phải buffer gói đến muộn.
+        """
+        self._exchange(OACK(accepted), 0, (OP_ACK,), ((OP_ACK, 0),))
+        window = max(1, self.windowsize)
+        unacked: deque[tuple[int, bytes]] = deque()
+        block = 0
+        final_sent = False
+        retries = self.retries
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                self.metrics.incr("sessions.transfer_timeout")
+                self._send_error(
+                    tftp_errors.ERR_NOT_DEFINED,
+                    "vượt quá thời gian tổng cho phép của transfer",
+                )
+                return
+            while not final_sent and len(unacked) < window:
+                chunk = read_fn()
+                block = next_block(block)
+                self._send(DATA(block, chunk))
+                unacked.append((block, chunk))
+                if len(chunk) < self.blksize:
+                    final_sent = True
+                    break
+            if not unacked:
+                elapsed = max(time.monotonic() - started, 1e-6)
+                self.metrics.incr("transfers.completed.RRQ")
+                self.log.info(
+                    "gửi xong '%s' (%d byte, windowsize=%d) cho %s",
+                    filename,
+                    total,
+                    window,
+                    format_sockaddr(self.client_addr),
+                )
+                self.log.debug(
+                    "tốc độ %.1f KiB/s", total / elapsed / 1024
+                )
+                return
+            packet = self._recv((OP_ACK,))
+            if packet is SESSION_REPLAY:
+                for sent_block, payload in unacked:
+                    self._send(DATA(sent_block, payload), retransmit=True)
+                continue
+            if packet is SESSION_TIMEOUT:
+                retries -= 1
+                self.metrics.incr("timeouts")
+                if retries < 0:
+                    raise tftp_errors.TftpTimeout(
+                        f"hết {self.retries} lần thử lại khi gửi '{filename}'"
+                    )
+                self.log.warning(
+                    "timeout: gửi lại %d block chưa ACK", len(unacked)
+                )
+                for sent_block, payload in unacked:
+                    self._send(DATA(sent_block, payload), retransmit=True)
+                continue
+            ack_block = packet.block
+            index = next(
+                (i for i, (sent_block, _payload) in enumerate(unacked) if sent_block == ack_block),
+                None,
+            )
+            if index is None:
+                self.metrics.incr("packets.stale")
+                continue
+            for _ in range(index + 1):
+                unacked.popleft()
+
     def _dally_final_ack(self, block: int) -> None:
         """Giữ TID thêm một nhịp sau khi gửi ACK cuối của WRQ.
 
@@ -616,43 +773,19 @@ class Session(threading.Thread):
         vào cổng không tồn tại và client phải chờ hết `retries` (mặc định
         5 × 5s) rồi báo lỗi — dù file đã lưu xong trên server.
 
-        Cửa sổ bị cắt bởi `timeout` đã thương lượng (client cũng dùng đúng giá
-        trị đó để retransmit) và bởi `server.final_ack_dally`.
+        Cửa sổ phải **dài hơn** khoảng retransmit của client (`timeout` đã
+        thương lượng), nếu không gói lặp luôn tới sau khi TID đã đóng. Socket
+        được giao cho `_dally_loop` của server nên thread phiên kết thúc ngay,
+        không chiếm slot `max_clients` trong lúc chờ.
         """
-        grace = min(self.timeout, float(self.server.final_ack_dally))
-        if grace <= 0:
+        dally = float(self.server.final_ack_dally)
+        if dally <= 0:
             return
-        if self.sock is None or self._notify_r is None:
+        grace = min(max(self.timeout + 0.25, dally), MAX_DALLY_SECONDS)
+        sock, self.sock = self.sock, None
+        if sock is None:
             return
-        deadline = time.monotonic() + grace
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            try:
-                readable, _, _ = select.select(
-                    [self.sock, self._notify_r], [], [], remaining
-                )
-            except (OSError, ValueError):
-                return
-            if not readable or self._notify_r in readable:
-                return
-            try:
-                raw, source = self.sock.recvfrom(MAX_DATAGRAM)
-            except OSError:
-                return
-            if address_key(source) != self.client_key:
-                continue
-            try:
-                packet = unpack(raw)
-            except tftp_errors.TftpError:
-                continue
-            if isinstance(packet, DATA) and packet.block == block:
-                self.log.debug("nhận lại DATA cuối block %d, ACK lại", block)
-                try:
-                    self._send(ACK(block), retransmit=True)
-                except tftp_errors.TftpError:
-                    return
+        self.server.register_dally(sock, self.client_addr, block, grace)
 
     def _read_chunk(self, handle, mode: str) -> bytes:
         """Đọc 1 chunk octet (giữ lại để tương thích). Netascii dùng NetasciiReader."""
@@ -739,6 +872,7 @@ class Session(threading.Thread):
                 if self.server.max_transfer_seconds is not None
                 else None
             )
+            self.deadline = deadline
             last_budget_check = started
             final_ack = None
             decoder = NetasciiDecoder() if request.mode == "netascii" else None
@@ -877,8 +1011,15 @@ class Session(threading.Thread):
 
                 try:
                     if self.server.allow_overwrite:
+                        try:
+                            previous = os.path.getsize(path)
+                        except OSError:
+                            previous = 0
                         os.replace(temp_path, path)
-                    elif not tftp_fs.commit_without_overwrite(temp_path, path):
+                        self.server.note_file_written(received - previous)
+                    elif tftp_fs.commit_without_overwrite(temp_path, path):
+                        self.server.note_file_written(received)
+                    else:
                         self.metrics.incr("requests.refused_overwrite")
                         self._send_error(
                             tftp_errors.ERR_FILE_EXISTS,
@@ -958,6 +1099,7 @@ class TftpServer:
         max_total_bytes: int | None = DEFAULT_MAX_TOTAL_BYTES,
         evict_oldest: bool = False,
         max_transfer_seconds: float | None = 3600.0,
+        windowsize: int = 1,
         final_ack_dally: float = FINAL_ACK_DALLY,
         cleanup_temp_age: float = 24 * 3600,
         stats_interval: float = 0.0,
@@ -986,6 +1128,10 @@ class TftpServer:
             raise ValueError("max_total_bytes phải > 0 hoặc None")
         if max_transfer_seconds is not None and max_transfer_seconds <= 0:
             raise ValueError("max_transfer_seconds phải > 0 hoặc None")
+        if not MIN_WINDOWSIZE <= windowsize <= MAX_WINDOWSIZE:
+            raise ValueError(
+                f"windowsize phải trong khoảng {MIN_WINDOWSIZE}..{MAX_WINDOWSIZE}"
+            )
         if final_ack_dally < 0:
             raise ValueError("final_ack_dally phải >= 0")
         if tid_port_range is not None:
@@ -1011,6 +1157,7 @@ class TftpServer:
         self.max_total_bytes = max_total_bytes
         self.evict_oldest = evict_oldest
         self.max_transfer_seconds = max_transfer_seconds
+        self.windowsize = windowsize
         self.final_ack_dally = final_ack_dally
         self.cleanup_temp_age = cleanup_temp_age
         self.log = logger or LOG
@@ -1027,9 +1174,22 @@ class TftpServer:
         self._active_writes: set[str] = set()
         self._quota_lock = threading.Lock()
         self._quota_reservations: dict[str, int] = {}
+        self._usage_bytes: int | None = None
+        self._usage_at = 0.0
         self._request_times: deque[float] = deque()
+        # Dally pool: giữ TID sau ACK cuối của WRQ mà không cần một thread mỗi
+        # phiên. Key là socket, value là (client_addr, block, deadline, grace).
+        self._dally: dict[socket.socket, tuple[tuple, int, float, float]] = {}
+        self._dally_guard = threading.Lock()
+        self._dally_stop = threading.Event()
+        self._dally_thread: threading.Thread | None = None
+        # Token-bucket nhỏ cho ERROR trả về gói không phải RRQ/WRQ: mỗi ERROR
+        # lớn hơn gói kích hoạt nó, nên không được để phản hồi không giới hạn.
+        self._error_windows: dict[tuple[str, int, int], tuple[float, int]] = {}
         os.makedirs(self.root, exist_ok=True)
         self._cleanup_temp_files()
+        self._usage_bytes = self._recount_root()
+        self._usage_at = time.monotonic()
 
     # ------------------------------------------------------------------ tiện ích ---
     def session_finished(self, session: Session) -> None:
@@ -1070,6 +1230,131 @@ class TftpServer:
             self._request_times.append(now)
             return True
 
+    def _allow_error_reply(self, client_key: tuple[str, int, int]) -> bool:
+        """Giới hạn số ERROR gửi cho một nguồn để chống khuếch đại UDP.
+
+        Chỉ áp cho các gói **không phải request hợp lệ** (malformed, opcode
+        lạ). Request hợp lệ vẫn đi qua rate limiter chung và nhánh replay.
+        """
+        now = time.monotonic()
+        window, count = self._error_windows.get(client_key, (now, 0))
+        if now - window >= 1.0:
+            window, count = now, 0
+        if count >= ERROR_REPLIES_PER_SECOND:
+            self.metrics.incr("errors.suppressed")
+            return False
+        if len(self._error_windows) > _MAX_ERROR_WINDOWS:
+            self._error_windows.clear()
+            window = now
+        self._error_windows[client_key] = (window, count + 1)
+        return True
+
+    # ------------------------------------------------------------- dally pool ---
+    def register_dally(
+        self, sock: socket.socket, client_addr: tuple, block: int, seconds: float
+    ) -> None:
+        """Nhận bàn giao socket TID để ACK lại DATA cuối bị thất lạc."""
+        if seconds <= 0:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return
+        with self._dally_guard:
+            if self._stop.is_set():
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                return
+            self._dally[sock] = (
+                client_addr,
+                block,
+                time.monotonic() + seconds,
+                seconds,
+            )
+            thread = self._dally_thread
+            if thread is None or not thread.is_alive():
+                self._dally_stop.clear()
+                thread = threading.Thread(
+                    target=self._dally_loop, name="tftp-dally", daemon=True
+                )
+                self._dally_thread = thread
+                thread.start()
+
+    def _dally_loop(self) -> None:
+        """Một thread chung: select trên mọi TID đang dally, ACK lại DATA cuối."""
+        while not self._dally_stop.is_set():
+            with self._dally_guard:
+                if not self._dally:
+                    self._dally_thread = None
+                    return
+                socks = list(self._dally)
+            try:
+                readable, _, _ = select.select(socks, [], [], 0.2)
+            except (OSError, ValueError):
+                readable = []
+            now = time.monotonic()
+            with self._dally_guard:
+                expired = [
+                    sock
+                    for sock, (_addr, _block, deadline, _grace) in self._dally.items()
+                    if deadline <= now
+                ]
+                for sock in expired:
+                    self._dally.pop(sock, None)
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            for sock in readable:
+                with self._dally_guard:
+                    entry = self._dally.get(sock)
+                if entry is None:
+                    continue
+                client_addr, block, _deadline, grace = entry
+                try:
+                    raw, source = sock.recvfrom(MAX_DATAGRAM)
+                except OSError:
+                    continue
+                if address_key(source) != address_key(client_addr):
+                    continue
+                try:
+                    packet = unpack(raw)
+                except tftp_errors.TftpError:
+                    continue
+                if isinstance(packet, DATA) and packet.block == block:
+                    self.metrics.incr("packets.dally_reacked")
+                    self.log.debug("nhận lại DATA cuối block %d, ACK lại", block)
+                    try:
+                        sock.sendto(ACK(block).pack(), source)
+                    except OSError:
+                        pass
+                    with self._dally_guard:
+                        if sock in self._dally:
+                            addr, blk, _old, window = self._dally[sock]
+                            self._dally[sock] = (
+                                addr,
+                                blk,
+                                time.monotonic() + window,
+                                min(window, grace),
+                            )
+
+    def _close_dally(self) -> None:
+        """Dừng pool và đóng mọi TID còn đang dally (dùng khi shutdown)."""
+        self._dally_stop.set()
+        thread = self._dally_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        with self._dally_guard:
+            for sock in list(self._dally):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self._dally.clear()
+            self._dally_thread = None
+
     # -------------------------------------------------------- tài nguyên/đĩa ---
     def _bind_session_socket(self, sock: socket.socket, family: int, local_addr: tuple) -> int:
         """Bind socket TID cùng family và trong dải port cấu hình (nếu có)."""
@@ -1087,10 +1372,10 @@ class TftpServer:
             return int(sock.getsockname()[1])
 
         low, high = self.tid_port_range
-        ports = list(range(low, high + 1))
-        random.shuffle(ports)
+        span = high - low + 1
         last_error: OSError | None = None
-        for candidate_port in ports:
+
+        def attempt(candidate_port: int) -> int | None:
             try:
                 if family == socket.AF_INET6:
                     sock.bind((bind_host, candidate_port, 0, scope_id))
@@ -1098,7 +1383,20 @@ class TftpServer:
                     sock.bind((bind_host, candidate_port))
                 return candidate_port
             except OSError as exc:
+                nonlocal last_error
                 last_error = exc
+                return None
+
+        for _ in range(min(span, TID_RANDOM_ATTEMPTS)):
+            port = attempt(random.randint(low, high))
+            if port is not None:
+                return port
+        scan_limit = span if span <= TID_RANDOM_ATTEMPTS else min(span, TID_SCAN_ATTEMPTS)
+        start = random.randint(low, high)
+        for offset in range(scan_limit):
+            port = attempt(low + (start - low + offset) % span)
+            if port is not None:
+                return port
         raise OSError(f"cạn port TID trong dải {low}..{high}: {last_error}") from last_error
 
     @staticmethod
@@ -1158,8 +1456,27 @@ class TftpServer:
                         files.append((entry.path, info.st_size, info.st_mtime))
         return files
 
-    def _root_usage(self) -> int:
+    def _recount_root(self) -> int:
         return sum(file_entry[1] for file_entry in self._quota_files())
+
+    def _root_usage(self) -> int:
+        """Dung lượng root, đọc từ cache và chỉ đi lại cây mỗi `QUOTA_RECHECK`.
+
+        Trước đây mỗi lần kiểm quota (mỗi WRQ + mỗi giây mỗi upload, tất cả
+        dưới `_quota_lock`) đều `os.walk` toàn bộ root: root 6 000 file là
+        ~100 ms/lần và dispatcher bị serialize theo.
+        """
+        now = time.monotonic()
+        if self._usage_bytes is None or now - self._usage_at > QUOTA_RECHECK_SECONDS:
+            self._usage_bytes = self._recount_root()
+            self._usage_at = now
+        return self._usage_bytes
+
+    def note_file_written(self, delta: int) -> None:
+        """Cập nhật cache dung lượng sau khi commit/ghi đè (delta có thể âm)."""
+        with self._quota_lock:
+            if self._usage_bytes is not None:
+                self._usage_bytes = max(0, self._usage_bytes + delta)
 
     def _check_disk_budget(
         self,
@@ -1242,6 +1559,7 @@ class TftpServer:
                             self.log.warning("không thể xóa file cũ để giải phóng quota: %s", path)
                             continue
                         usage -= size
+                        self._usage_bytes = max(0, (self._usage_bytes or 0) - size)
                         # Mức WARNING: đây là xoá dữ liệu của người dùng, phải
                         # hiện trong log mặc định chứ không nằm im ở DEBUG/INFO.
                         self.log.warning("đã xóa file cũ nhất để giải phóng quota: %s", path)
@@ -1290,7 +1608,7 @@ class TftpServer:
             if "\\" in filename or ":" in filename:
                 return None
             parts = filename.split("/")
-            if any(p in ("..", ".", "") for p in parts):
+            if any(not _is_valid_path_component(part) for part in parts):
                 return None
         path = os.path.abspath(os.path.join(self.root, filename))
         if self._has_reparse_component(path):
@@ -1348,7 +1666,16 @@ class TftpServer:
             if MIN_BLKSIZE <= value <= MAX_BLKSIZE:
                 accepted[OPTION_BLKSIZE] = str(value)
             else:
-                accepted[OPTION_BLKSIZE] = str(self.blksize)
+                # RFC 2348 §2: giá trị OACK phải <= giá trị client xin. Giá trị
+                # ngoài 8..65464 không hợp lệ, nên bỏ option để cả hai dùng 512
+                # của RFC 1350 thay vì trả `--blksize` (1468) — client conforming
+                # (tftp-hpa/atftp) coi 1468 > 4 là lỗi negotiation và abort.
+                self.log.info(
+                    "bỏ option blksize=%s ngoài khoảng %d..%d",
+                    value,
+                    MIN_BLKSIZE,
+                    MAX_BLKSIZE,
+                )
         if OPTION_TIMEOUT in values:
             value = values[OPTION_TIMEOUT]
             if 1 <= value <= 255:
@@ -1358,6 +1685,13 @@ class TftpServer:
                 accepted[OPTION_TIMEOUT] = str(clamp_timeout(self.timeout))
         if OPTION_TSIZE in values:
             accepted[OPTION_TSIZE] = str(size if size is not None else 0)
+        if OPTION_WINDOWSIZE in values and self.windowsize > 1:
+            # RFC 7440: server trả giá trị <= giá trị client xin.
+            value = values[OPTION_WINDOWSIZE]
+            if MIN_WINDOWSIZE <= value <= MAX_WINDOWSIZE:
+                accepted[OPTION_WINDOWSIZE] = str(min(value, self.windowsize))
+            else:
+                self.log.info("bỏ option windowsize=%s ngoài khoảng hợp lệ", value)
         unknown = [name for name in requested if name.lower() not in OPTION_NAMES]
         if unknown:
             self.log.info("bỏ qua option không hỗ trợ: %s", ", ".join(sorted(unknown)))
@@ -1489,19 +1823,21 @@ class TftpServer:
         except tftp_errors.TftpError as exc:
             self.metrics.incr("packets.malformed")
             self.log.warning("gói tin lỗi từ %s: %s", format_sockaddr(addr), exc)
-            self._send_error_from_listener(listener[0], addr, exc.code, str(exc))
+            if self._allow_error_reply(client_key):
+                self._send_error_from_listener(listener[0], addr, exc.code, str(exc))
             return
 
         if not isinstance(packet, (RRQ, WRQ)):
             # Gói DATA/ACK/OACK tới well-known port = TID lạ (RFC 1350 §4.2).
             self.metrics.incr("packets.unknown_tid")
             self.log.warning("%s không hợp lệ từ %s", describe(packet), format_sockaddr(addr))
-            self._send_error_from_listener(
-                listener[0],
-                addr,
-                tftp_errors.ERR_UNKNOWN_TID,
-                f"Unknown transfer ID: {describe(packet)}",
-            )
+            if self._allow_error_reply(client_key):
+                self._send_error_from_listener(
+                    listener[0],
+                    addr,
+                    tftp_errors.ERR_UNKNOWN_TID,
+                    f"Unknown transfer ID: {describe(packet)}",
+                )
             return
 
         # 4.3: giới hạn request/s để chống flood thread — nhưng chỉ tính request
@@ -1657,6 +1993,7 @@ class TftpServer:
         for session in sessions:
             session.join(timeout=5)
         self.wait_for_idle(timeout=5.0)
+        self._close_dally()
         self.log.info("server đã dừng")
         if self.metrics.counter("sessions.started.RRQ") or self.metrics.counter(
             "sessions.started.WRQ"
@@ -1741,6 +2078,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=3600.0,
         help="thời gian tối đa cho một transfer (giây, 0 = không giới hạn)",
+    )
+    parser.add_argument(
+        "--windowsize",
+        type=int,
+        default=1,
+        metavar="N",
+        help="RFC 7440: số block gửi trước khi chờ ACK (1..64; 1 = RFC 1350)",
     )
     parser.add_argument(
         "--tid-port-range",
@@ -1828,6 +2172,7 @@ def _config_from_args(args: argparse.Namespace) -> ServerConfig:
         max_total_bytes=args.max_total_bytes or None,
         evict_oldest=args.evict_oldest,
         max_transfer_seconds=args.max_transfer_seconds or None,
+        windowsize=args.windowsize,
         cleanup_temp_age=args.cleanup_temp_age,
         stats_interval=args.stats_interval,
         log_file=args.log_file,

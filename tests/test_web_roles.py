@@ -325,7 +325,10 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(store.epoch(), 0)
         with store.connect() as check:
             columns = {row["name"] for row in check.execute("PRAGMA table_info(users)")}
+            tables = {row["name"] for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"role", "banned", "muted", "created"} <= columns)
+        self.assertIn("files", tables)
         self.assertEqual(SESSION_SECONDS, 12 * 60 * 60)
 
 

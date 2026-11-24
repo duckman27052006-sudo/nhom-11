@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .tftp_net import FAMILY_MODES
+from .tftp_packet import MAX_WINDOWSIZE, MIN_WINDOWSIZE
 
 DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 500 * 1024 * 1024
@@ -48,6 +49,8 @@ class ServerConfig:
     # liệu là hành vi phá hoại, chỉ nên bật khi người vận hành chủ động chọn.
     evict_oldest: bool = False
     max_transfer_seconds: float | None = DEFAULT_MAX_TRANSFER_SECONDS
+    # RFC 7440: số block được gửi trước khi chờ ACK. 1 = hành vi RFC 1350 cũ.
+    windowsize: int = 1
     cleanup_temp_age: float = DEFAULT_CLEANUP_TEMP_AGE
     stats_interval: float = 0.0
     log_file: str | None = None
@@ -74,6 +77,7 @@ class ServerConfig:
             "max_total_bytes": self.max_total_bytes,
             "evict_oldest": self.evict_oldest,
             "max_transfer_seconds": self.max_transfer_seconds,
+            "windowsize": self.windowsize,
             "cleanup_temp_age": self.cleanup_temp_age,
             "stats_interval": self.stats_interval,
         }
@@ -92,6 +96,7 @@ class ServerConfig:
             f"max_total_bytes={self.max_total_bytes}",
             f"evict_oldest={self.evict_oldest}",
             f"max_transfer_seconds={self.max_transfer_seconds}",
+            f"windowsize={self.windowsize}",
             f"tid_port_range={self.tid_port_range}",
             f"max_clients={self.max_clients}",
             f"max_requests_per_second={self.max_requests_per_second}",
@@ -119,6 +124,7 @@ _ALLOWED_KEYS = {
     "max_total_bytes",
     "evict_oldest",
     "max_transfer_seconds",
+    "windowsize",
     "cleanup_temp_age",
     "stats_interval",
     "log_file",
@@ -231,6 +237,8 @@ def from_mapping(data: dict[str, Any]) -> ServerConfig:
         config.max_transfer_seconds = _as_optional_positive_float(
             data["max_transfer_seconds"], "max_transfer_seconds"
         )
+    if "windowsize" in data:
+        config.windowsize = _as_int(data["windowsize"], "windowsize")
     if "cleanup_temp_age" in data:
         config.cleanup_temp_age = _as_float(data["cleanup_temp_age"], "cleanup_temp_age")
     if "stats_interval" in data:
@@ -265,6 +273,10 @@ def validate(config: ServerConfig) -> None:
         raise ConfigError("min_free_bytes phải >= 0")
     if config.max_total_bytes is not None and config.max_total_bytes <= 0:
         raise ConfigError("max_total_bytes phải > 0 hoặc null")
+    if not MIN_WINDOWSIZE <= config.windowsize <= MAX_WINDOWSIZE:
+        raise ConfigError(
+            f"windowsize phải trong khoảng {MIN_WINDOWSIZE}..{MAX_WINDOWSIZE}"
+        )
     if config.cleanup_temp_age < 0:
         raise ConfigError("cleanup_temp_age phải >= 0")
     if config.log_max_bytes < 0:

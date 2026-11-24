@@ -15,12 +15,14 @@ Cách dùng trên dòng lệnh::
 from __future__ import annotations
 
 import argparse
+import errno
 import logging
 import os
 import socket
 import sys
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -43,13 +45,16 @@ from .tftp_packet import (
     MAX_BLKSIZE,
     MAX_DATAGRAM,
     MAX_STALE_PACKETS,
+    MAX_WINDOWSIZE,
     MIN_BLKSIZE,
+    MIN_WINDOWSIZE,
     OP_ACK,
     OP_DATA,
     OP_OACK,
     OPTION_BLKSIZE,
     OPTION_TIMEOUT,
     OPTION_TSIZE,
+    OPTION_WINDOWSIZE,
     RRQ,
     WRQ,
     NetasciiDecoder,
@@ -89,6 +94,7 @@ class TftpClient:
         blksize: int = DEFAULT_BLKSIZE,
         mode: str = "octet",
         use_options: bool = True,
+        windowsize: int = 1,
         family: FamilyMode = "auto",
         overwrite: bool = False,
         total_timeout: float | None = None,
@@ -102,6 +108,10 @@ class TftpClient:
             raise ValueError("timeout phải lớn hơn 0")
         if not 8 <= blksize <= 65464:
             raise ValueError("blksize phải trong khoảng 8..65464")
+        if not MIN_WINDOWSIZE <= windowsize <= MAX_WINDOWSIZE:
+            raise ValueError(
+                f"windowsize phải trong khoảng {MIN_WINDOWSIZE}..{MAX_WINDOWSIZE}"
+            )
         if total_timeout is not None and total_timeout <= 0:
             raise ValueError("total_timeout phải lớn hơn 0")
         self.host = host
@@ -109,6 +119,7 @@ class TftpClient:
         self.timeout = float(timeout)
         self.retries = max(1, retries)
         self.blksize = blksize
+        self.windowsize = windowsize
         self.mode = mode
         self.use_options = use_options
         self.family = family
@@ -149,9 +160,38 @@ class TftpClient:
         sock.settimeout(self.timeout if timeout is None else timeout)
         return sock
 
+    @staticmethod
+    def _is_address_error(exc: OSError) -> bool:
+        """True nếu lỗi là của *địa chỉ* (hết route/family), không phải file.
+
+        Chỉ những lỗi này mới được phép thử candidate DNS kế tiếp; lỗi mở file
+        cục bộ (EACCES, ENOENT...) phải nổi lên ngay.
+        """
+        if isinstance(exc, (ConnectionRefusedError, ConnectionResetError)):
+            return True
+        errnos = {
+            errno.EHOSTUNREACH,
+            errno.ENETUNREACH,
+            errno.EAFNOSUPPORT,
+            errno.EADDRNOTAVAIL,
+            errno.ECONNREFUSED,
+        }
+        # Windows trả mã WSA* qua `errno` của OSError (không phải các hằng ở trên).
+        for name in (
+            "WSAEHOSTUNREACH",
+            "WSAENETUNREACH",
+            "WSAEAFNOSUPPORT",
+            "WSAEADDRNOTAVAIL",
+            "WSAECONNREFUSED",
+        ):
+            value = getattr(errno, name, None)
+            if value is not None:
+                errnos.add(value)
+        return exc.errno in errnos
+
     def _check_deadline(self) -> None:
         if self.cancel_event is not None and self.cancel_event.is_set():
-            raise tftp_errors.TftpTimeout("đã hủy truyền theo yêu cầu")
+            raise tftp_errors.TftpCancelled()
         if self._deadline is not None and time.monotonic() > self._deadline:
             raise tftp_errors.TftpTimeout("vượt quá thời gian tổng cho phép của transfer")
 
@@ -163,6 +203,8 @@ class TftpClient:
             OPTION_BLKSIZE: str(self.blksize),
             OPTION_TIMEOUT: str(clamp_timeout(self.timeout)),
         }
+        if self.windowsize > 1:
+            options[OPTION_WINDOWSIZE] = str(self.windowsize)
         if for_upload:
             # WRQ gửi kích thước thật để server kiểm tra trước khi nhận.
             if size is not None:
@@ -174,27 +216,34 @@ class TftpClient:
             options[OPTION_TSIZE] = "0"
         return options
 
-    def _apply_oack(self, packet, timeout: float) -> tuple[int, float, int | None]:
-        """Tính blksize/timeout/tsize đã thương lượng, KHÔNG đụng vào self (2.2).
+    def _apply_oack(self, packet, timeout: float) -> tuple[int, float, int | None, int]:
+        """Tính blksize/timeout/tsize/windowsize đã thương lượng, KHÔNG đụng self.
 
-        Trả về (blksize, timeout, tsize). RFC 2347: option nào không có trong
-        OACK thì dùng giá trị mặc định — riêng blksize mặc định là 512, không
-        phải giá trị client đề nghị (nếu giữ 1468 thì hai bên lệch blksize và
-        truyền dừng sau block đầu).
+        Trả về (blksize, timeout, tsize, windowsize). RFC 2347: option nào
+        không có trong OACK thì dùng giá trị mặc định — riêng blksize mặc định
+        là 512, không phải giá trị client đề nghị (nếu giữ 1468 thì hai bên
+        lệch blksize và truyền dừng sau block đầu).
         """
         values = parse_options(packet)
         new_blksize = DEFAULT_BLKSIZE
         new_timeout = timeout
         tsize: int | None = None
+        new_windowsize = 1
         negotiated = values.get(OPTION_BLKSIZE)
         if negotiated is not None and 8 <= negotiated <= 65464:
             new_blksize = negotiated
         negotiated_timeout = values.get(OPTION_TIMEOUT)
         if negotiated_timeout is not None and 1 <= negotiated_timeout <= 255:
             new_timeout = float(negotiated_timeout)
+        negotiated_window = values.get(OPTION_WINDOWSIZE)
+        if (
+            negotiated_window is not None
+            and MIN_WINDOWSIZE <= negotiated_window <= MAX_WINDOWSIZE
+        ):
+            new_windowsize = negotiated_window
         if OPTION_TSIZE in values:
             tsize = values.get(OPTION_TSIZE)
-        return new_blksize, new_timeout, tsize
+        return new_blksize, new_timeout, tsize, new_windowsize
 
     # -------------------------------------------------------- gửi / nhận gói ---
     def _target(self) -> tuple:
@@ -213,7 +262,11 @@ class TftpClient:
     def _recv_valid(self, sock: socket.socket, accept_ops: tuple[int, ...]):
         """Chờ một gói tin hợp lệ đúng TID của server. Trả None nếu hết thời gian chờ."""
         tid = self._state.tid
+        # Ngân sách gói không tiến triển: gói lạ/hỏng tới liên tục không được
+        # làm mới thời gian chờ vô hạn (mỗi vòng recv lại có timeout mới).
+        stale = MAX_STALE_PACKETS
         while True:
+            self._check_deadline()
             try:
                 raw, source = sock.recvfrom(MAX_DATAGRAM)
             except TimeoutError:
@@ -230,6 +283,9 @@ class TftpClient:
                 if not same_ip(source, self._state.target):
                     self.metrics.incr("packets.foreign_host")
                     self._warn(f"bỏ qua gói từ host lạ {source[0]}")
+                    stale -= 1
+                    if stale < 0:
+                        return None
                     continue
                 tid = source
                 self._state.tid = tid
@@ -238,6 +294,9 @@ class TftpClient:
             elif source != tid:
                 self.metrics.incr("packets.foreign_tid")
                 self._warn(f"bỏ qua gói từ TID lạ {source[0]}:{source[1]}")
+                stale -= 1
+                if stale < 0:
+                    return None
                 continue
 
             self.metrics.incr("packets.received")
@@ -256,6 +315,9 @@ class TftpClient:
             if packet.OPCODE not in accept_ops:
                 self.metrics.incr("packets.unexpected")
                 self._warn(f"bỏ qua {describe(packet)}, đang chờ gói khác")
+                stale -= 1
+                if stale < 0:
+                    return None
                 continue
             return packet
 
@@ -323,6 +385,9 @@ class TftpClient:
         try:
             with self.metrics.span(f"transfer.duration.{kind}", fail_counter=kind):
                 result = action()
+        except tftp_errors.TftpCancelled:
+            self.metrics.incr(f"{kind}.cancelled")
+            raise
         except tftp_errors.TftpTimeout:
             self.metrics.incr(f"{kind}.timeout")
             raise
@@ -354,9 +419,21 @@ class TftpClient:
 
         candidates = self._candidates()
         last_timeout: tftp_errors.TftpTimeout | None = None
+        last_address_error: OSError | None = None
         for index, candidate in enumerate(candidates):
             self._new_state(candidate)
-            sock = self._open_socket(candidate)
+            try:
+                sock = self._open_socket(candidate)
+            except OSError as exc:
+                if index + 1 < len(candidates) and self._is_address_error(exc):
+                    last_address_error = exc
+                    self._warn(
+                        f"không mở được socket tới "
+                        f"{format_endpoint(candidate.host, candidate.port)}: {exc}; "
+                        "thử địa chỉ DNS kế tiếp"
+                    )
+                    continue
+                raise
             started = time.monotonic()
             self._info(
                 f"RRQ {remote} -> {local} qua {format_endpoint(candidate.host, candidate.port)} "
@@ -376,9 +453,27 @@ class TftpClient:
                     f"địa chỉ {format_endpoint(candidate.host, candidate.port)} không phản hồi, "
                     "thử địa chỉ DNS kế tiếp"
                 )
+            except OSError as exc:
+                if (
+                    self._state.tid is None
+                    and index + 1 < len(candidates)
+                    and self._is_address_error(exc)
+                ):
+                    last_address_error = exc
+                    self._warn(
+                        f"không kết nối được tới "
+                        f"{format_endpoint(candidate.host, candidate.port)}: {exc}; "
+                        "thử địa chỉ DNS kế tiếp"
+                    )
+                else:
+                    raise
             finally:
                 sock.close()
-        raise last_timeout or tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
+        if last_timeout is not None:
+            raise last_timeout
+        if last_address_error is not None:
+            raise last_address_error
+        raise tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
 
     def _download_with_socket(
         self,
@@ -407,9 +502,17 @@ class TftpClient:
             decoder = NetasciiDecoder() if self.mode == "netascii" else None
             with handle:
                 if first.OPCODE == OP_OACK:
-                    wire_blksize, cur_timeout, negotiated_size = self._apply_oack(
-                        first, cur_timeout
+                    wire_blksize, cur_timeout, negotiated_size, negotiated_window = (
+                        self._apply_oack(first, cur_timeout)
                     )
+                    if negotiated_window > 1:
+                        # Server có thể gửi cả cửa sổ trước khi ta ACK: nới
+                        # buffer nhận để không mất gói (best effort).
+                        try:
+                            wanted = min(4 * 1024 * 1024, wire_blksize * negotiated_window * 2)
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, wanted)
+                        except OSError:
+                            pass
                     if not self.use_options:
                         wire_blksize = DEFAULT_BLKSIZE
                     try:
@@ -480,9 +583,21 @@ class TftpClient:
         size = os.path.getsize(local)
         candidates = self._candidates()
         last_timeout: tftp_errors.TftpTimeout | None = None
+        last_address_error: OSError | None = None
         for index, candidate in enumerate(candidates):
             self._new_state(candidate)
-            sock = self._open_socket(candidate)
+            try:
+                sock = self._open_socket(candidate)
+            except OSError as exc:
+                if index + 1 < len(candidates) and self._is_address_error(exc):
+                    last_address_error = exc
+                    self._warn(
+                        f"không mở được socket tới "
+                        f"{format_endpoint(candidate.host, candidate.port)}: {exc}; "
+                        "thử địa chỉ DNS kế tiếp"
+                    )
+                    continue
+                raise
             started = time.monotonic()
             self._info(
                 f"WRQ {local} -> {remote} qua {format_endpoint(candidate.host, candidate.port)} "
@@ -501,9 +616,27 @@ class TftpClient:
                     f"địa chỉ {format_endpoint(candidate.host, candidate.port)} không phản hồi, "
                     "thử địa chỉ DNS kế tiếp"
                 )
+            except OSError as exc:
+                if (
+                    self._state.tid is None
+                    and index + 1 < len(candidates)
+                    and self._is_address_error(exc)
+                ):
+                    last_address_error = exc
+                    self._warn(
+                        f"không kết nối được tới "
+                        f"{format_endpoint(candidate.host, candidate.port)}: {exc}; "
+                        "thử địa chỉ DNS kế tiếp"
+                    )
+                else:
+                    raise
             finally:
                 sock.close()
-        raise last_timeout or tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
+        if last_timeout is not None:
+            raise last_timeout
+        if last_address_error is not None:
+            raise last_address_error
+        raise tftp_errors.TftpTimeout("không có địa chỉ nào phản hồi")
 
     def _upload_with_socket(
         self,
@@ -517,11 +650,12 @@ class TftpClient:
     ) -> str:
         cur_timeout = self.timeout
         wire_blksize = DEFAULT_BLKSIZE
+        negotiated_window = 1
         request = WRQ(remote, self.mode, self._requested_options(for_upload=True, size=size))
         first = self._exchange(sock, request, (OP_OACK, OP_ACK), None)
         self.metrics.observe("transfer.ttfb", time.monotonic() - started)
         if first.OPCODE == OP_OACK:
-            wire_blksize, cur_timeout, _ = self._apply_oack(first, cur_timeout)
+            wire_blksize, cur_timeout, _, negotiated_window = self._apply_oack(first, cur_timeout)
             if not self.use_options:
                 wire_blksize = DEFAULT_BLKSIZE
             try:
@@ -538,8 +672,15 @@ class TftpClient:
         else:
             wire_blksize = DEFAULT_BLKSIZE
 
+        if negotiated_window > 1:
+            block, source_total = self._upload_windowed(
+                sock, local, wire_blksize, negotiated_window, size, progress
+            )
+            self._summary("gửi lên", remote, source_total, block, started)
+            return remote
+
         block = 0
-        sent_total = 0
+        source_total = 0
         with open(local, "rb") as handle:
             reader = NetasciiReader(handle, wire_blksize) if self.mode == "netascii" else None
             while True:
@@ -550,14 +691,85 @@ class TftpClient:
                     chunk = handle.read(wire_blksize)
                 block = next_block(block)
                 self._exchange(sock, DATA(block, chunk), (OP_ACK,), (OP_ACK, block))
-                sent_total += len(chunk)
-                self._log_block(block, len(chunk), sent_total)
+                # netascii làm dữ liệu dài ra trên dây (CR->CR NUL, LF->CR LF),
+                # nên progress phải bám byte nguồn; trước đây dùng byte wire và
+                # báo vượt 100% với file có nhiều ký tự xuống dòng.
+                source_total = min(handle.tell(), size)
+                self._log_block(block, len(chunk), source_total)
                 if progress is not None:
-                    progress(sent_total, size)
+                    progress(source_total, size)
                 if len(chunk) < wire_blksize:
                     break
-        self._summary("gửi lên", remote, sent_total, block, started)
+        self._summary("gửi lên", remote, source_total, block, started)
         return remote
+
+
+    def _upload_windowed(
+        self,
+        sock: socket.socket,
+        local: str,
+        wire_blksize: int,
+        window: int,
+        size: int,
+        progress: ProgressFn | None,
+    ) -> tuple[int, int]:
+        """Gửi theo RFC 7440: tối đa `window` DATA trước khi chờ ACK.
+
+        Trả về (block cuối, số byte nguồn đã gửi). Retransmit là go-back-N:
+        gửi lại toàn bộ block chưa được ACK, đúng tinh thần RFC 7440 §4.
+        """
+        block = 0
+        source_total = 0
+        unacked: deque[tuple[int, bytes]] = deque()
+        final_sent = False
+        retries = self.retries
+        with open(local, "rb") as handle:
+            reader = NetasciiReader(handle, wire_blksize) if self.mode == "netascii" else None
+            while True:
+                self._check_deadline()
+                while not final_sent and len(unacked) < window:
+                    if reader is not None:
+                        chunk = reader.read_chunk()
+                    else:
+                        chunk = handle.read(wire_blksize)
+                    block = next_block(block)
+                    self._send(sock, DATA(block, chunk))
+                    unacked.append((block, chunk))
+                    source_total = min(handle.tell(), size)
+                    self._log_block(block, len(chunk), source_total)
+                    if progress is not None:
+                        progress(source_total, size)
+                    if len(chunk) < wire_blksize:
+                        final_sent = True
+                        break
+                if not unacked:
+                    return block, source_total
+                reply = self._recv_valid(sock, (OP_ACK,))
+                if reply is None:
+                    retries -= 1
+                    self.metrics.incr("timeouts")
+                    if retries < 0:
+                        raise tftp_errors.TftpTimeout(
+                            f"hết {self.retries} lần thử lại khi gửi file"
+                        )
+                    self._warn(f"timeout: gửi lại {len(unacked)} block chưa ACK")
+                    for sent_block, payload in unacked:
+                        self._send(sock, DATA(sent_block, payload), retransmit=True)
+                    continue
+                ack_block = reply.block
+                index = next(
+                    (
+                        i
+                        for i, (sent_block, _payload) in enumerate(unacked)
+                        if sent_block == ack_block
+                    ),
+                    None,
+                )
+                if index is None:
+                    self.metrics.incr("packets.stale")
+                    continue
+                for _ in range(index + 1):
+                    unacked.popleft()
 
 
 # --------------------------------------------------------------------- CLI ---
@@ -585,6 +797,18 @@ def _blksize_value(value: str) -> int:
     if not MIN_BLKSIZE <= size <= MAX_BLKSIZE:
         raise argparse.ArgumentTypeError(
             f"--blocksize phải trong {MIN_BLKSIZE}..{MAX_BLKSIZE}"
+        )
+    return size
+
+
+def _windowsize_value(value: str) -> int:
+    try:
+        size = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"không phải số nguyên: {value!r}") from None
+    if not MIN_WINDOWSIZE <= size <= MAX_WINDOWSIZE:
+        raise argparse.ArgumentTypeError(
+            f"--windowsize phải trong {MIN_WINDOWSIZE}..{MAX_WINDOWSIZE}"
         )
     return size
 
@@ -639,6 +863,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout", type=_positive_seconds, default=DEFAULT_TIMEOUT, help="thời gian chờ (giây)"
+    )
+    parser.add_argument(
+        "--windowsize",
+        type=_windowsize_value,
+        default=1,
+        help="RFC 7440: số block gửi trước khi chờ ACK (1..64; 1 = RFC 1350)",
     )
     parser.add_argument("--retries", type=int, default=5, help="số lần thử lại tối đa")
     parser.add_argument(
@@ -697,6 +927,7 @@ def main(argv: list | None = None) -> int:
             blksize=args.blocksize,
             mode=args.mode,
             use_options=not args.no_options,
+            windowsize=args.windowsize,
             family=args.family,
             overwrite=args.overwrite,
             total_timeout=args.total_timeout,

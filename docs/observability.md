@@ -58,7 +58,51 @@ TftpServer(root="files", metrics=shared)
 TftpClient("127.0.0.1", 6969, metrics=shared)
 ```
 
-## 2. Ba loại số đo
+## 2. Prometheus và health endpoint
+
+Gateway web xuất Prometheus text format tại `/metrics`:
+
+```bash
+# Chỉ admin đã đăng nhập, hoặc dùng bearer token (khuyến nghị cho scraper):
+python -m tftp.web_upload --host 192.168.1.10 --metrics-token "$METRICS_TOKEN"
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://192.168.1.10:8080/metrics
+```
+
+Ví dụ `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: tftp-gateway
+    scrape_interval: 30s
+    authorization:
+      credentials: "<metrics-token>"
+    static_configs:
+      - targets: ["192.168.1.10:8080"]
+```
+
+`Metrics.render_prometheus()` cũng dùng trực tiếp được cho server/client nếu bạn
+tự gắn vào một HTTP exporter:
+
+```python
+print(server.metrics.render_prometheus("tftp_server"))
+```
+
+Timer xuất thành summary `_count`/`_sum` + quantile p50/p95/p99 (giây); tên metric
+được chuẩn hoá và gắn tiền tố. Counter thành `*_total`.
+
+### Health: liveness vs readiness
+
+| Endpoint | Kiểm tra | Dùng cho |
+|---|---|---|
+| `/livez` | chỉ SQLite | liveness probe (rẻ, không phụ thuộc TFTP) |
+| `/readyz` | SQLite + RRQ probe tới TFTP | readiness probe, monitoring |
+| `/healthz` | như `/readyz` | tương thích monitoring cũ |
+
+Trước đây `/healthz` vừa là liveness vừa probe TFTP: khi TFTP chưa bật (trạng
+thái bình thường trước khi bấm "Khởi động server"), orchestrator sẽ restart liên
+tục. Nay liveness chỉ kiểm SQLite.
+
+## 3. Ba loại số đo
 
 | Loại | Ngữ nghĩa | Ví dụ |
 |---|---|---|
@@ -74,7 +118,7 @@ soak test chạy hàng giờ không phình RAM mà phân vị vẫn có ý nghĩ
 
 Mọi thao tác đều an toàn khi gọi từ nhiều thread (server mở 1 thread/phiên).
 
-## 3. Danh mục chỉ số
+## 4. Danh mục chỉ số
 
 ### 3.1 Server
 
@@ -124,7 +168,7 @@ Mọi thao tác đều an toàn khi gọi từ nhiều thread (server mở 1 thr
 | `exchange.rtt` | timer | round-trip từng gói |
 | `packets.*`, `bytes.*`, `payload.*`, `timeouts` | — | giống server |
 
-## 4. Câu hỏi vận hành và cách tính
+## 5. Câu hỏi vận hành và cách tính
 
 | Muốn biết | Công thức |
 |---|---|
@@ -134,7 +178,7 @@ Mọi thao tác đều an toàn khi gọi từ nhiều thread (server mở 1 thr
 | Tỉ lệ gói rác đến từ môi trường | `packets.malformed / datagrams.received` |
 | Độ trễ tail | `exchange.rtt.p99`, `exchange.rtt.max` |
 
-## 5. Cảnh báo nên cài
+## 6. Cảnh báo nên cài
 
 - `errors.unhandled > 0` — server gặp lỗi chưa xử lý, cần xem log.
 - `sessions.finished.timeout / sessions.started.* > 0.05` — mạng chập chờn

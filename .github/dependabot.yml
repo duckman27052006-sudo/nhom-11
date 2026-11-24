@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      optional-extras:
+        patterns: ["Flask", "waitress", "PySide6"]
+      dev-tools:
+        patterns: ["ruff", "mypy", "coverage", "pip-audit"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

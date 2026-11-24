@@ -65,7 +65,8 @@ thật; chỉ khi peer nằm trong `--trusted-proxy` gateway mới đọc
 | `--tftp-server` | `127.0.0.1:6969` | IPv4, hostname hoặc `[IPv6]:port` TFTP |
 | `--data-dir` | `web-data` | Dữ liệu tài khoản/phiên/chat, nằm ngoài root TFTP |
 | `--max-file-size` | `100` | MiB tối đa mỗi file, cả tải và gửi |
-| `--secure-cookie` | tắt | Chỉ dùng nếu phục vụ web qua HTTPS |
+| `--secure-cookie` | tắt | Bắt buộc cookie `Secure` kể cả khi không nhận diện được HTTPS |
+| `--metrics-token` | không đặt | Bearer token cho `/metrics`; mặc định chỉ admin đã đăng nhập xem được |
 | `--max-concurrent-uploads` | `4` | Tổng lượt tải/gửi đồng thời |
 | `--trusted-host` | địa chỉ bind + localhost | Host header được phép thêm (tên miền nội bộ); lặp lại được |
 | `--threads` | `8` | Số worker Waitress |
@@ -85,11 +86,20 @@ cho phép subnet tương ứng và dùng `--tftp-server "[::1]:6969"` khi TFTP c
 ## Tài khoản và chat
 
 - Tên tài khoản 3–32 ký tự: chữ ASCII, số, dấu `_`; tên trùng không phân biệt hoa thường.
-- Mật khẩu 8–128 ký tự, lưu hash có salt. Phiên 12 giờ, cookie HttpOnly và
-  SameSite=Lax; đăng xuất hủy phiên phía server. Có CSRF và giới hạn đăng nhập/đăng ký.
+- Mật khẩu 8–128 ký tự, lưu hash scrypt có salt riêng. Phiên 12 giờ, cookie
+  HttpOnly + SameSite=Lax; đăng xuất hủy phiên phía server. Có CSRF và giới hạn
+  đăng nhập/đăng ký.
+- Khi chạy sau reverse proxy HTTPS (khai báo `--trusted-proxy`), cookie tự động
+  chuyển sang tên `__Host-tftp_session` + cờ `Secure`, và response có HSTS;
+  không cần (nhưng vẫn có thể) bật `--secure-cookie`.
 - Một phòng chat chung, không có tin nhắn riêng. Tin 1–2.000 ký tự, tối đa 30
   tin/phút mỗi tài khoản. Nội dung hiển thị như văn bản thuần.
-- Mở phòng tải 50 tin mới nhất; cập nhật mỗi 2 giây. Thời gian theo thiết bị người xem.
+- Mở phòng tải 50 tin mới nhất; tin mới đến qua **SSE** (`GET /api/stream`,
+  `text/event-stream`) và tự nối lại khi mất kết nối. Nếu trình duyệt/proxy không
+  hỗ trợ SSE, giao diện tự quay về polling `/api/messages` 2,2 giây.
+- Gateway giới hạn số stream đồng thời (mặc định 4) để không chiếm hết worker
+  Waitress; mỗi stream tự đóng sau tối đa 5 phút và EventSource mở lại.
+- Giao diện có dark mode theo `prefers-color-scheme` của hệ điều hành.
 - Sao lưu `web-data/portal.sqlite3` bằng SQLite backup khi đang chạy hoặc sao chép
   cả thư mục dữ liệu sau khi dừng gateway. Giữ thư mục này riêng tư và không commit.
 - Không có chức năng khôi phục mật khẩu hay duyệt tài khoản trước khi vào cổng.
@@ -159,8 +169,18 @@ Lõi TFTP yêu cầu tên ASCII: file upload có dấu được đổi sang tên
 (ví dụ `Đề tài.txt` → `De_tai.txt`) và giao diện báo tên đã lưu. File được quản lý
 chép trực tiếp vào root cần có tên ASCII để xuất hiện trong danh sách web.
 Giữ quyền ghi đè/giới hạn của TFTP server; mặc định không ghi đè file trùng tên; chỉ bật `--overwrite` khi cần.
-Không có chức năng xóa file trên web. File tải về luôn là attachment, không mở
-HTML do người dùng gửi trong origin của ứng dụng.
+
+**Vòng đời file:** gateway ghi nhận người upload đầu tiên cho mỗi tên file.
+- `GET /api/files` trả thêm `owner` (tên tài khoản) và `can_delete` cho từng file.
+- `DELETE /api/files/<name>`: người upload hoặc quản trị viên được xóa; người
+  khác nhận `403`. Xóa vật lý khỏi root TFTP và ghi log audit.
+- Khi TFTP trả `ERROR 6` (trùng tên), gateway tự đổi tên `stem (2).ext`,
+  `stem (3).ext`… tối đa 9 lần rồi upload lại; response trả `filename` cuối và
+  `renamed: true` để giao diện thông báo thay vì bắt người dùng đổi tên tay.
+- File do quản trị viên chép tay vào root không có owner; chỉ admin xóa được.
+
+File tải về luôn là attachment, không mở HTML do người dùng gửi trong origin của
+ứng dụng.
 
 Đây là HTTP LAN không mã hóa, không phải dịch vụ Internet. Chỉ dùng trên mạng
 tin cậy; không port-forward router. TFTP thuần không có xác thực/mã hóa: tài khoản
@@ -190,13 +210,21 @@ các chức năng này dùng SQLite/thư mục trên máy, còn upload/download 
 Windows có thể báo `WinError 10054` khi không có dịch vụ ở cổng UDP đích. Web
 hiển thị HTTP 504 kèm địa chỉ/cổng và hướng dẫn khởi động, thay cho lỗi gửi file chung.
 
-### Health check
+### Health check và số liệu
 
-`GET /healthz` kiểm tra cả SQLite (một truy vấn `SELECT 1`) lẫn TFTP (gửi RRQ
-một tên chắc chắn không tồn tại, coi ERROR trả về là server còn sống). Kết quả
-`200` khi cả hai OK, `503` kèm `{"status":"degraded","checks":{...}}` khi một
-thành phần lỗi. Kết quả được cache 5 giây để monitoring không tạo phiên TFTP
-liên tục; đổi bằng `HEALTH_CACHE_SECONDS` khi dùng `create_app`.
+- `GET /livez` — liveness rẻ: chỉ mở SQLite và chạy `SELECT 1`. Dùng cho
+  orchestrator; TFTP chưa bật **không** làm endpoint này fail.
+- `GET /readyz` — readiness: SQLite + RRQ probe tới TFTP (một tên chắc chắn
+  không tồn tại; ERROR trả về nghĩa là server còn sống). `200` khi cả hai OK,
+  `503` kèm `{"status":"degraded","checks":{...}}` khi một thành phần lỗi.
+- `GET /healthz` — giữ đúng hành vi readiness cũ để monitoring hiện có không
+  phải đổi.
+- `GET /metrics` — Prometheus text format. Mặc định chỉ tài khoản admin đã đăng
+  nhập; nếu đặt `--metrics-token`, scraper dùng header
+  `Authorization: Bearer <token>`.
+
+Kết quả health được cache 5 giây để monitoring không tạo phiên TFTP liên tục;
+đổi bằng `HEALTH_CACHE_SECONDS` khi dùng `create_app`.
 
 ### Dịch vụ và kiểm thử
 

@@ -23,4 +23,10 @@ deploy/.env
 deploy/data
 deploy/wireguard/*.conf
 deploy/wireguard/*.key
+deploy/wireguard/generated
 deploy/caddy/Caddyfile
+*.msi
+report_build
+.tmp-run
+.coverage
+coverage.xml

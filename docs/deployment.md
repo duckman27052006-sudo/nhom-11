@@ -40,6 +40,7 @@ ngẫu nhiên sau RRQ/WRQ, nên chỉ mở port 6969 là chưa đủ.
   "max_total_bytes": 10737418240,
   "evict_oldest": false,
   "max_transfer_seconds": 3600,
+  "windowsize": 8,
   "tid_port_range": [50000, 50100],
   "cleanup_temp_age": 86400,
   "log_file": "C:/ProgramData/TftpServer/logs/server.log",
@@ -75,12 +76,14 @@ port/blksize/quota ngoài khoảng đều bị từ chối với mã `2`.
 
 ```bash
 sudo useradd --system --home /var/lib/tftp --shell /usr/sbin/nologin tftp
-sudo install -d -o tftp -g tftp -m 0750 /var/lib/tftp/files /var/lib/tftp/logs
-sudo install -d -o tftp -g tftp -m 0700 /var/lib/tftp/incoming
+sudo install -d -o tftp -g tftp -m 0750 /var/lib/tftp/files /var/lib/tftp/incoming
+sudo install -d -o tftp -g tftp -m 0750 /var/log/tftp
 ```
 
-Chạy bằng systemd unit mẫu trong `packaging/tftp-server.service`, chỉnh
-`ExecStart`, `User`, `Group`, `ReadWritePaths`.
+Chạy bằng systemd unit mẫu trong `packaging/tftp-server.service`. Unit dùng
+`StateDirectory=tftp` + `LogsDirectory=tftp` (systemd tự tạo `/var/lib/tftp` và
+`/var/log/tftp` đúng quyền) và chạy `--check-config` trong `ExecStartPre`, nên
+cấu hình sai làm service fail ngay thay vì chạy với mặc định.
 
 ## 4. Firewall
 
@@ -157,6 +160,13 @@ Server chỉ được coi là sẵn sàng khi:
 3. Thư mục root tồn tại/ghi được (server tạo root nếu chưa có; quyền ghi do tài
    khoản dịch vụ quyết định).
 4. Log ghi được.
+
+Với gateway web (nếu dùng):
+
+- `/livez` chỉ kiểm SQLite — dùng cho liveness probe (không restart chỉ vì TFTP
+  chưa bật).
+- `/readyz` kiểm SQLite + TFTP — dùng cho readiness và monitoring.
+- `/metrics` xuất Prometheus text (admin session hoặc `--metrics-token`).
 
 Kiểm tra nhanh từ máy client:
 

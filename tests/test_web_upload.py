@@ -86,6 +86,70 @@ class TestWebUpload(unittest.TestCase):
         response = self.client.get("/", environ_base={"REMOTE_ADDR": "203.0.113.8"})
         self.assertEqual(response.status_code, 403)
 
+    def test_livez_and_readyz_split(self):
+        # Liveness chỉ cần SQLite; readiness mới probe TFTP. Trong test không
+        # có TFTP server nên readyz phải 503 còn livez vẫn 200.
+        live = self.client.get("/livez", base_url="http://upload.lan")
+        self.assertEqual(live.status_code, 200)
+        ready = self.client.get("/readyz", base_url="http://upload.lan")
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(ready.json["checks"]["tftp"], "unreachable")
+
+    def test_security_headers_are_present(self):
+        response = self.client.get("/", base_url="http://upload.lan")
+        self.assertEqual(response.headers["Cross-Origin-Opener-Policy"], "same-origin")
+        self.assertEqual(response.headers["Cross-Origin-Resource-Policy"], "same-origin")
+        self.assertIn("camera=()", response.headers["Permissions-Policy"])
+        self.assertNotIn("Strict-Transport-Security", response.headers)
+
+    def test_metrics_requires_admin_session(self):
+        # upload_test là tài khoản đầu tiên nên là admin.
+        response = self.client.get("/metrics", base_url="http://upload.lan")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn("tftp_web_uptime_seconds", body)
+        self.assertIn("# TYPE", body)
+        member = self.app.test_client()
+        csrf = member.get("/api/session", base_url="http://upload.lan").json["csrf"]
+        member.post("/api/register", json={"username": "member_one", "password": "member-pass-123"},
+                    base_url="http://upload.lan", headers={"X-CSRF-Token": csrf})
+        self.assertEqual(member.get("/metrics", base_url="http://upload.lan").status_code, 403)
+
+    def test_metrics_bearer_token(self):
+        self.app.config["METRICS_TOKEN"] = "s3cret-token"
+        self.assertEqual(self.client.get("/metrics", base_url="http://upload.lan").status_code, 401)
+        response = self.client.get(
+            "/metrics",
+            base_url="http://upload.lan",
+            headers={"Authorization": "Bearer s3cret-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_https_proxy_enables_host_cookie_and_hsts(self):
+        app = create_app(
+            {"FILE_ROOT": Path(self.temp.name) / "tls-root",
+             "DATA_DIR": Path(self.temp.name) / "tls-data",
+             "ALLOWED_HOSTS": TEST_HOSTS,
+             "TRUSTED_PROXIES": ["127.0.0.1/32"]},
+            allowed_networks=["192.168.10.0/24", "127.0.0.1/32"],
+        )
+        client = app.test_client()
+        proxy = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "upload.lan"}
+        csrf = client.get(
+            "/api/session", base_url="http://upload.lan", headers=proxy
+        ).json["csrf"]
+        response = client.post(
+            "/api/register",
+            json={"username": "tls_user", "password": "tls-password-123"},
+            base_url="http://upload.lan",
+            headers={**proxy, "X-CSRF-Token": csrf},
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        cookies = response.headers.getlist("Set-Cookie")
+        self.assertTrue(any(c.startswith("__Host-tftp_session=") for c in cookies), cookies)
+        self.assertTrue(all("Secure" in c for c in cookies), cookies)
+        self.assertIn("Strict-Transport-Security", response.headers)
+
     def test_host_header_must_be_allowlisted(self):
         self.assertEqual(self.client.get("/", headers={"Host": "upload.lan"}).status_code, 200)
         self.assertEqual(self.client.get("/", headers={"Host": "evil.example"}).status_code, 400)
@@ -355,6 +419,116 @@ class TestWebUpload(unittest.TestCase):
             with self.subTest(address=address), self.assertRaises(UploadConfigError):
                 validate_bind_host(address)
 
+    # ---------------------------------------------------------- file lifecycle
+
+    def register_member(self, username):
+        client = self.app.test_client()
+        csrf = client.get("/api/session", base_url="http://upload.lan").json["csrf"]
+        response = client.post(
+            "/api/register", json={"username": username, "password": "member-pass-123"},
+            base_url="http://upload.lan", headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 200, response.json)
+        return client, response.json["csrf"]
+
+    def upload_bytes(self, client, csrf, name, payload=b"hello"):
+        return client.post(
+            "/api/upload",
+            data={"file": (bytes_file(name, payload), name)},
+            headers={"Origin": "http://upload.lan", "Host": "upload.lan",
+                     "X-CSRF-Token": csrf},
+            environ_base={"REMOTE_ADDR": "192.168.10.8"},
+        )
+
+    def delete_file(self, client, csrf, name):
+        return client.delete(
+            f"/api/files/{name}",
+            headers={"Origin": "http://upload.lan", "Host": "upload.lan",
+                     "X-CSRF-Token": csrf},
+            environ_base={"REMOTE_ADDR": "192.168.10.8"},
+        )
+
+    def test_upload_records_owner_and_file_listing_flags(self):
+        member, csrf = self.register_member("member_one")
+        with patch("tftp.web_upload.TftpClient", writing_client(self.tftp_root)):
+            response = self.upload_bytes(member, csrf, "owned.txt", b"payload")
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertFalse(response.json["renamed"])
+
+        store = self.app.extensions["web_store"]
+        record = store.file_owner("owned.txt")
+        self.assertIsNotNone(record)
+        self.assertEqual(record["username"], "member_one")
+        self.assertEqual(record["size"], 7)
+
+        listing = {item["name"]: item
+                   for item in member.get("/api/files", base_url="http://upload.lan").json["files"]}
+        self.assertEqual(listing["owned.txt"]["owner"], "member_one")
+        self.assertTrue(listing["owned.txt"]["can_delete"])
+
+        outsider, _ = self.register_member("member_two")
+        other = {item["name"]: item for item in outsider.get("/api/files", base_url="http://upload.lan").json["files"]}
+        self.assertEqual(other["owned.txt"]["owner"], "member_one")
+        self.assertFalse(other["owned.txt"]["can_delete"])
+        # The first account is the administrator, so it may remove anything.
+        admin = {item["name"]: item for item in self.client.get("/api/files", base_url="http://upload.lan").json["files"]}
+        self.assertTrue(admin["owned.txt"]["can_delete"])
+
+    def test_non_owner_cannot_delete_file(self):
+        member, csrf = self.register_member("member_one")
+        with patch("tftp.web_upload.TftpClient", writing_client(self.tftp_root)):
+            self.assertEqual(self.upload_bytes(member, csrf, "private.txt").status_code, 201)
+        outsider, outsider_csrf = self.register_member("member_two")
+
+        response = self.delete_file(outsider, outsider_csrf, "private.txt")
+
+        self.assertEqual(response.status_code, 403, response.json)
+        self.assertTrue((self.tftp_root / "private.txt").is_file())
+        store = self.app.extensions["web_store"]
+        self.assertIsNotNone(store.file_owner("private.txt"))
+
+    def test_owner_can_delete_file(self):
+        member, csrf = self.register_member("member_one")
+        with patch("tftp.web_upload.TftpClient", writing_client(self.tftp_root)):
+            self.assertEqual(self.upload_bytes(member, csrf, "mine.txt").status_code, 201)
+
+        response = self.delete_file(member, csrf, "mine.txt")
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["deleted"], "mine.txt")
+        self.assertFalse((self.tftp_root / "mine.txt").exists())
+        self.assertIsNone(self.app.extensions["web_store"].file_owner("mine.txt"))
+        names = [item["name"] for item in member.get("/api/files", base_url="http://upload.lan").json["files"]]
+        self.assertNotIn("mine.txt", names)
+        actions = self.app.extensions["web_store"].overview()["actions"]
+        self.assertIn("delete_file", [action["action"] for action in actions])
+
+    def test_admin_can_delete_any_file(self):
+        member, csrf = self.register_member("member_one")
+        with patch("tftp.web_upload.TftpClient", writing_client(self.tftp_root)):
+            self.assertEqual(self.upload_bytes(member, csrf, "theirs.txt").status_code, 201)
+        store = self.app.extensions["web_store"]
+        self.assertEqual(store.file_owner("theirs.txt")["username"], "member_one")
+
+        response = self.delete_file(self.client, self.csrf, "theirs.txt")
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertFalse((self.tftp_root / "theirs.txt").exists())
+        self.assertIsNone(store.file_owner("theirs.txt"))
+
+    def test_upload_collision_autorenames_and_keeps_both_files(self):
+        (self.tftp_root / "report.txt").write_bytes(b"original")
+        with patch("tftp.web_upload.TftpClient", collision_client(self.tftp_root)):
+            response = self.upload_bytes(self.client, self.csrf, "report.txt", b"replacement")
+
+        self.assertEqual(response.status_code, 201, response.json)
+        self.assertTrue(response.json["renamed"])
+        self.assertEqual(response.json["filename"], "report (2).txt")
+        self.assertEqual((self.tftp_root / "report.txt").read_bytes(), b"original")
+        self.assertEqual((self.tftp_root / "report (2).txt").read_bytes(), b"replacement")
+        store = self.app.extensions["web_store"]
+        self.assertEqual(store.file_owner("report (2).txt")["username"], "upload_test")
+        self.assertIsNone(store.file_owner("report.txt"))
+
     def test_public_allowlist_and_invalid_tftp_port_are_rejected(self):
         with self.assertRaises(UploadConfigError):
             create_app(allowed_networks=["0.0.0.0/0"])
@@ -367,6 +541,32 @@ class TestWebUpload(unittest.TestCase):
             )
         with self.assertRaises(UploadConfigError):
             create_app(allowed_hosts=["bad host"])
+
+
+def writing_client(root: Path):
+    """Minimal TftpClient stand-in that writes uploads into the TFTP root."""
+
+    class FakeTftpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def upload(self, local, remote):
+            (root / remote).write_bytes(Path(local).read_bytes())
+
+    return FakeTftpClient
+
+
+def collision_client(root: Path):
+    """Reject an existing remote name exactly like the real TFTP server does."""
+
+    class CollisionTftpClient(writing_client(root)):
+        def upload(self, local, remote):
+            if (root / remote).exists():
+                raise tftp_errors.TftpRemoteError(
+                    tftp_errors.ERR_FILE_EXISTS, "file already exists")
+            (root / remote).write_bytes(Path(local).read_bytes())
+
+    return CollisionTftpClient
 
 
 def bytes_file(_filename: str, content: bytes) -> BytesIO:

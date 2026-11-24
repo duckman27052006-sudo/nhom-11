@@ -24,6 +24,9 @@
     cursor: null,
     pollTimer: null,
     pollBusy: false,
+    stream: null,
+    streamGeneration: 0,
+    streamVersion: 0,
     sendBusy: false,
     uploadBusy: false,
     progressTimer: null,
@@ -169,6 +172,7 @@
 
   async function recoverSession() {
     clearTimeout(state.pollTimer);
+    closeStream();
     clearInterval(state.adminTimer);
     clearInterval(state.restrictionTimer);
     state.user = null;
@@ -211,6 +215,7 @@
     state.generation += 1;
     state.chatVersion += 1;
     clearTimeout(state.pollTimer);
+    closeStream();
     clearInterval(state.adminTimer);
     clearInterval(state.restrictionTimer);
     state.pollBusy = false;
@@ -276,7 +281,7 @@
     renderRestriction();
     state.restrictionTimer = setInterval(renderRestriction, 30000);
     loadFiles();
-    pollMessages();
+    startChatFeed();
     if (state.canModerate) {
       startAdmin();
       loadAdmin();
@@ -329,7 +334,7 @@
 
   function fileRow(file) {
     const row = el("tr");
-    row.dataset.search = `${file.name}`.toLowerCase();
+    row.dataset.search = `${file.name} ${file.owner || ""}`.toLowerCase();
 
     const cell = el("td");
     const wrap = el("div", "file-cell");
@@ -337,21 +342,33 @@
     badge.append(icon("i-doc"));
     const copy = el("div");
     copy.append(el("span", "file-name", file.name));
-    const date = el("span", "file-date", new Date(file.modified * 1000).toLocaleString("vi-VN"));
-    copy.append(date);
+    const origin = file.owner ? `Người tải: ${file.owner}` : "Chưa ghi nhận người tải";
+    copy.append(el("span", "file-date",
+      `${new Date(file.modified * 1000).toLocaleString("vi-VN")} · ${origin}`));
     wrap.append(badge, copy);
     cell.append(wrap);
 
     const size = el("td", "", formatSize(file.size));
 
     const action = el("td");
+    const actions = el("div", "file-actions");
     const download = el("button", "gel gel--glass gel--sm");
     download.type = "button";
     download.setAttribute("aria-label", `Tải về ${file.name}`);
     download.append(icon("i-download"));
     download.append(el("span", "", "Tải về"));
     download.addEventListener("click", () => downloadFile(file.name, download));
-    action.append(download);
+    actions.append(download);
+    if (file.can_delete) {
+      const remove = el("button", "gel gel--danger gel--sm");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Xóa ${file.name}`);
+      remove.append(icon("i-trash"));
+      remove.append(el("span", "", "Xóa"));
+      remove.addEventListener("click", () => openDeleteFileModal(file));
+      actions.append(remove);
+    }
+    action.append(actions);
 
     row.append(cell, size, action);
     return row;
@@ -378,6 +395,23 @@
     } finally {
       $("refresh-files").disabled = false;
     }
+  }
+
+  function openDeleteFileModal(file) {
+    openModal({
+      eyebrow: "CHIA SẺ · XÓA TỆP",
+      title: `Xóa “${file.name}”?`,
+      description: "Tệp sẽ bị xóa khỏi máy chủ TFTP và mọi người sẽ không thể tải về nữa. Hành động này không thể hoàn tác.",
+      confirmLabel: "Xóa tệp",
+      tone: "gel--danger",
+      onConfirm: async () => {
+        const data = await api(`/api/files/${encodeURIComponent(file.name)}`,
+          { method: "DELETE" });
+        toast(data.message || "Đã xóa tệp.", "ok");
+        await loadFiles();
+        if (state.canModerate) loadAdmin({ silent: true });
+      },
+    });
   }
 
   async function downloadFile(name, button) {
@@ -472,10 +506,12 @@
       $("upload-submit").disabled = false;
       if (xhr.status === 201) {
         setProgress(1, "Hoàn tất");
-        const renamed = data.filename && data.filename !== file.name
-          ? ` Tên lưu trên máy chủ: ${data.filename}.`
+        const changed = data.renamed === true
+          || (data.filename && data.filename !== file.name);
+        const saved = changed && data.filename
+          ? ` Tệp trùng tên nên máy chủ đã lưu thành ${data.filename}.`
           : "";
-        toast(`Đã gửi ${file.name}.${renamed}`, "ok");
+        toast(`Đã gửi ${file.name}.${saved}`, "ok");
         $("upload-form").reset();
         $("upload-name").textContent = "Chưa chọn tệp nào";
         loadFiles();
@@ -589,16 +625,121 @@
     $("restriction-text").textContent = parts.join(" ");
   }
 
-  function resetChatView() {
-    state.chatVersion += 1;
-    state.messages = [];
-    state.cursor = null;
-    state.serverEpoch = null;
+  function closeStream() {
+    if (state.stream) {
+      const source = state.stream;
+      state.stream = null;
+      source.close();
+    }
+  }
+
+  function markChatConnected() {
+    $("chat-state").textContent = "Đã kết nối";
+    $("chat-state").classList.remove("is-off");
+    $("stat-status").textContent = "ổn định";
+  }
+
+  function consumeChat(data) {
     const box = $("messages");
-    box.replaceChildren($("chat-empty"));
-    $("chat-empty").hidden = false;
-    $("new-messages").hidden = true;
+    const following = state.cursor === null || nearBottom(box);
+    if (data.reset) {
+      state.messages = [];
+      state.cursor = null;
+      box.replaceChildren($("chat-empty"));
+    }
+    state.serverEpoch = data.epoch;
+    if (data.chat) applyChatState(data.chat, data.can_moderate);
+    const incoming = Array.isArray(data.messages) ? data.messages : [];
+    for (const message of incoming) {
+      if (state.cursor !== null && message.id <= state.cursor) continue;
+      box.append(buildMessage(message));
+      state.messages.push(message);
+      state.cursor = message.id;
+    }
+    if (state.cursor === null) state.cursor = 0;
+    while (state.messages.length > 300) {
+      state.messages.shift();
+      const first = box.querySelector(".msg");
+      if (first) first.remove();
+    }
+    $("stat-messages").textContent = String(state.messages.length);
+    $("chat-empty").hidden = state.messages.length > 0;
+    markChatConnected();
+    if (following) {
+      box.scrollTop = box.scrollHeight;
+      $("new-messages").hidden = true;
+    } else if (incoming.length) {
+      $("new-messages").hidden = false;
+    }
     applySearch();
+    return incoming.length;
+  }
+
+  function startChatFeed() {
+    closeStream();
+    clearTimeout(state.pollTimer);
+    if (!state.user) return;
+    if (typeof window.EventSource === "function") {
+      openStream();
+    } else {
+      pollMessages();
+    }
+  }
+
+  function openStream() {
+    if (!state.user) return;
+    if (typeof window.EventSource !== "function") {
+      pollMessages();
+      return;
+    }
+    closeStream();
+    clearTimeout(state.pollTimer);
+    const params = new URLSearchParams();
+    if (state.cursor !== null) params.set("after", String(state.cursor));
+    if (state.serverEpoch !== null) params.set("epoch", String(state.serverEpoch));
+    const query = params.toString();
+    const source = new EventSource(`/api/stream${query ? `?${query}` : ""}`);
+    state.stream = source;
+    state.streamGeneration = state.generation;
+    state.streamVersion = state.chatVersion;
+    const current = () => state.stream === source
+      && state.generation === state.streamGeneration
+      && state.chatVersion === state.streamVersion;
+    source.addEventListener("open", () => {
+      if (current()) markChatConnected();
+    });
+    source.addEventListener("messages", (event) => {
+      if (!current()) return;
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      consumeChat(data);
+    });
+    source.addEventListener("chat", (event) => {
+      if (!current()) return;
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (data.chat) applyChatState(data.chat, data.can_moderate);
+    });
+    source.addEventListener("expire", () => {
+      if (state.stream !== source) return;
+      closeStream();
+      recoverSession();
+    });
+    source.addEventListener("error", () => {
+      if (state.stream !== source) return;
+      closeStream();
+      $("chat-state").textContent = "Đang tải lại tin nhắn";
+      $("chat-state").classList.add("is-off");
+      pollMessages();
+    });
   }
 
   function forceChatRefresh() {
@@ -610,9 +751,11 @@
     box.replaceChildren($("chat-empty"));
     $("chat-empty").hidden = false;
     $("new-messages").hidden = true;
+    closeStream();
     clearTimeout(state.pollTimer);
     state.pollBusy = false;
-    pollMessages();
+    if (typeof window.EventSource === "function") openStream();
+    else pollMessages();
   }
 
   function schedulePoll(delay) {
@@ -637,40 +780,7 @@
       const query = params.toString();
       const data = await api(`/api/messages${query ? `?${query}` : ""}`);
       if (generation !== state.generation || version !== state.chatVersion) return;
-      const box = $("messages");
-      const following = state.cursor === null || nearBottom(box);
-      if (data.reset) {
-        state.messages = [];
-        state.cursor = null;
-        box.replaceChildren($("chat-empty"));
-      }
-      state.serverEpoch = data.epoch;
-      applyChatState(data.chat || {}, data.can_moderate);
-      for (const message of data.messages || []) {
-        if (state.cursor !== null && message.id <= state.cursor) continue;
-        box.append(buildMessage(message));
-        state.messages.push(message);
-        state.cursor = message.id;
-      }
-      if (state.cursor === null) state.cursor = 0;
-      while (state.messages.length > 300) {
-        state.messages.shift();
-        const first = box.querySelector(".msg");
-        if (first) first.remove();
-      }
-      $("stat-messages").textContent = String(state.messages.length);
-      $("chat-empty").hidden = state.messages.length > 0;
-      $("chat-state").textContent = "Đã kết nối";
-      $("chat-state").classList.remove("is-off");
-      $("stat-status").textContent = "ổn định";
-      if (following) {
-        box.scrollTop = box.scrollHeight;
-        $("new-messages").hidden = true;
-      } else if ((data.messages || []).length) {
-        $("new-messages").hidden = false;
-      }
-      applySearch();
-      if ((data.messages || []).length === 100) delay = 0;
+      if (consumeChat(data) === 100) delay = 0;
     } catch {
       if (generation === state.generation) {
         $("chat-state").textContent = "Mất kết nối · đang thử lại";
@@ -680,7 +790,9 @@
       }
     } finally {
       state.pollBusy = false;
-      if (state.user && generation === state.generation) schedulePoll(delay);
+      if (state.user && generation === state.generation && !state.stream) {
+        schedulePoll(delay);
+      }
     }
   }
 

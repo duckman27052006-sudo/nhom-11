@@ -22,6 +22,7 @@ from tftp import tftp_errors, tftp_fs, tftp_packet
 from tftp.tftp_client import TftpClient, build_arg_parser, validate_direction_args
 from tftp.tftp_errors import TftpFormatError, TftpIllegalOperation
 from tftp.tftp_metrics import Timer
+from tftp.tftp_net import ResolvedAddress
 from tftp.tftp_packet import (
     ACK,
     DATA,
@@ -81,8 +82,10 @@ class TestPacketEdges(unittest.TestCase):
             unpack(raw)
 
     def test_request_over_512_bytes_rejected(self):
+        # Dùng option lạ để kiểm tra giới hạn 512 byte của request; option đã
+        # biết (như windowsize) bị validate kiểu số trước cả khi đóng gói.
         with self.assertRaises(TftpIllegalOperation):
-            RRQ("x", "octet", {"windowsize": "1" * 600}).pack()
+            RRQ("x", "octet", {"x-long": "1" * 600}).pack()
 
     def test_decoder_joins_cr_nul_split_across_blocks(self):
         decoder = NetasciiDecoder()
@@ -389,10 +392,13 @@ class TestListenerPort(unittest.TestCase):
 class TestFinalAckDally(unittest.TestCase):
     def test_server_acks_duplicate_final_data_after_wrq(self):
         # RFC 1350 §5: ACK cuối của WRQ bị mất thì client gửi lại DATA cuối và
-        # bên nhận phải ACK lại thay vì đã đóng TID.
+        # bên nhận phải ACK lại thay vì đã đóng TID. Gói lặp thực tế tới sau
+        # đúng một khoảng `timeout`, nên cửa sổ dally phải dài hơn timeout —
+        # trước đây `min(timeout, final_ack_dally)` làm nó luôn ngắn hơn và
+        # test chỉ pass vì gửi lại ngay lập tức.
         payload = b"x" * 100
-        with ServerHarness(final_ack_dally=1.0, timeout=2.0) as srv:
-            sock = _udp(2.0)
+        with ServerHarness(final_ack_dally=1.0, timeout=0.6) as srv:
+            sock = _udp(3.0)
             try:
                 sock.sendto(WRQ("d.bin", "octet").pack(), ("127.0.0.1", srv.port))
                 raw, tid = sock.recvfrom(65535)
@@ -400,7 +406,8 @@ class TestFinalAckDally(unittest.TestCase):
                 sock.sendto(DATA(1, payload).pack(), tid)
                 raw, _ = sock.recvfrom(65535)
                 self.assertEqual(unpack(raw), ACK(1))
-                # ACK cuối "bị mất": client gửi lại DATA cuối.
+                # ACK cuối "bị mất": client chỉ retransmit sau một timeout.
+                time.sleep(0.7)
                 sock.sendto(DATA(1, payload).pack(), tid)
                 raw, _ = sock.recvfrom(65535)
                 self.assertEqual(unpack(raw), ACK(1))
@@ -451,6 +458,129 @@ class TestClientCliValidation(unittest.TestCase):
         args = self._parse(["--get", "a", "--timeout", "2.5", "--blocksize", "1468"])
         self.assertEqual(args.timeout, 2.5)
         self.assertEqual(args.blocksize, 1468)
+
+
+class TestPathComponents(unittest.TestCase):
+    def test_allow_subdirs_still_rejects_hidden_and_temp_components(self):
+        # `is_servable_name` chỉ nhìn basename, nên `.git/config` từng lọt qua
+        # khi bật --allow-subdirs (mode README khuyên dùng cho incoming/).
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, ".git").mkdir()
+            Path(root, ".git", "config").write_text("[core]", encoding="utf-8")
+            Path(root, "sub").mkdir()
+            Path(root, "sub", "ok.txt").write_text("ok", encoding="utf-8")
+            Path(root, "sub", ".env").write_text("SECRET=1", encoding="utf-8")
+            Path(root, "sub", "x.part").write_text("x", encoding="utf-8")
+            server = TftpServer("127.0.0.1", 0, root=root, allow_subdirs=True)
+            try:
+                self.assertIsNone(server.resolve_path(".git/config"))
+                self.assertIsNone(server.resolve_path("sub/.env"))
+                self.assertIsNone(server.resolve_path("sub/x.part"))
+                self.assertIsNone(server.resolve_path("sub/CON"))
+                self.assertIsNotNone(server.resolve_path("sub/ok.txt"))
+            finally:
+                server.shutdown()
+
+
+class TestBlksizeNegotiation(unittest.TestCase):
+    def test_out_of_range_blksize_is_not_echoed(self):
+        # RFC 2348 §2: OACK không được lớn hơn giá trị client xin. Trả 1468 cho
+        # yêu cầu "4" khiến tftp-hpa/atftp abort với ERROR 8.
+        with tempfile.TemporaryDirectory() as root:
+            server = TftpServer("127.0.0.1", 0, root=root)
+            try:
+                self.assertNotIn("blksize", server.negotiate_options({"blksize": "4"}, None))
+                accepted = server.negotiate_options({"blksize": "4", "timeout": "3"}, None)
+                self.assertNotIn("blksize", accepted)
+                self.assertEqual(accepted["timeout"], "3")
+                self.assertEqual(
+                    server.negotiate_options({"blksize": "1468"}, None)["blksize"], "1468"
+                )
+                self.assertEqual(
+                    server.negotiate_options({"blksize": "65464"}, None)["blksize"], "65464"
+                )
+            finally:
+                server.shutdown()
+
+
+class TestErrorReplyBudget(unittest.TestCase):
+    def test_error_replies_are_rate_limited_per_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            server = TftpServer("127.0.0.1", 0, root=root)
+            try:
+                allowed = sum(1 for _ in range(30) if server._allow_error_reply("10.0.0.1:1:0"))
+                self.assertLessEqual(allowed, 20)
+                self.assertGreaterEqual(allowed, 1)
+                self.assertTrue(server._allow_error_reply("10.0.0.2:1:0"))
+            finally:
+                server.shutdown()
+
+
+class TestStalePacketBudget(unittest.TestCase):
+    def test_junk_packets_cannot_keep_a_session_alive_forever(self):
+        # Mỗi gói rác (đúng TID, sai định dạng) trước đây làm mới `select` nên
+        # session không bao giờ chạm deadline. Bơm rác liên tục phải bị dừng.
+        with ServerHarness(
+            {"junk.bin": b"y" * 64},
+            timeout=0.15,
+            retries=20,
+            max_transfer_seconds=0.5,
+        ) as srv:
+            sock = _udp(1.0)
+            try:
+                sock.sendto(RRQ("junk.bin", "octet").pack(), ("127.0.0.1", srv.port))
+                raw, tid = sock.recvfrom(65535)
+                self.assertEqual(unpack(raw).OPCODE, tftp_packet.OP_DATA)
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline and srv.server.active_sessions:
+                    sock.sendto(b"\x00\x01", tid)
+                    time.sleep(0.05)
+                self.assertEqual(srv.server.active_sessions, 0)
+            finally:
+                sock.close()
+
+    def test_client_drops_foreign_packets_without_looping_forever(self):
+        client = TftpClient("127.0.0.1", 6969, timeout=0.1, retries=1)
+        client._new_state(
+            ResolvedAddress(socket.AF_INET, ("127.0.0.1", 6969), "127.0.0.1", 6969)
+        )
+        sock = mock.Mock()
+        sock.recvfrom.return_value = (b"\x00\x04\x00\x01", ("10.9.8.7", 5555))
+        self.assertIsNone(client._recv_valid(sock, (tftp_packet.OP_ACK,)))
+        self.assertEqual(sock.recvfrom.call_count, tftp_packet.MAX_STALE_PACKETS + 1)
+
+
+class TestClientCancel(unittest.TestCase):
+    def test_cancel_is_not_reported_as_timeout_and_leaves_no_partial(self):
+        with ServerHarness({"a.bin": b"z" * 100}) as srv, tempfile.TemporaryDirectory() as out:
+            cancel = threading.Event()
+            cancel.set()
+            target = Path(out) / "a.bin"
+            with self.assertRaises(tftp_errors.TftpCancelled):
+                srv.client(cancel_event=cancel).download("a.bin", str(target))
+            self.assertFalse(target.exists())
+            self.assertEqual(list(Path(out).iterdir()), [])
+
+
+class TestUploadProgress(unittest.TestCase):
+    def test_netascii_progress_never_exceeds_file_size(self):
+        # netascii làm dữ liệu dài ra trên dây; progress cũ đếm byte wire nên
+        # báo vượt 100% với file nhiều dòng.
+        source_bytes = b"line\n" * 300
+        with ServerHarness() as srv, tempfile.TemporaryDirectory() as out:
+            source = Path(out) / "lines.txt"
+            source.write_bytes(source_bytes)
+            seen: list[tuple[int, int]] = []
+            srv.client(mode="netascii", blksize=64).upload(
+                str(source),
+                "lines.txt",
+                progress=lambda done, total: seen.append((done, total)),
+            )
+            self.assertTrue(seen)
+            self.assertTrue(all(done <= total for done, total in seen))
+            self.assertEqual(seen[-1][0], len(source_bytes))
+            self.assertTrue(all(b[0] >= a[0] for a, b in zip(seen, seen[1:], strict=False)))
+            self.assertEqual(srv.read("lines.txt"), source_bytes)
 
 
 if __name__ == "__main__":

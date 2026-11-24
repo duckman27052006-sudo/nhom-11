@@ -107,6 +107,14 @@ Nhom11-TFTP.pptx
 *.pfx
 *.kdbx
 id_rsa*
+
+# Coverage / benchmark tạm
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tmp-run/
+bench*.json
 id_ed25519*
 
 # File rác ở thư mục gốc (files/empty.dat vẫn được track nhờ quy tắc whitelist)

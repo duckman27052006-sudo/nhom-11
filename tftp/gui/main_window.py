@@ -22,11 +22,33 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import cast
 
-from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QResizeEvent
+from PySide6.QtCore import (
+    QByteArray,
+    QCoreApplication,
+    QObject,
+    QPropertyAnimation,
+    QSettings,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QResizeEvent,
+    QTextBlockUserData,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,7 +74,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..tftp_client import TftpClient, _parse_server
 from ..tftp_config import DEFAULT_MAX_TOTAL_BYTES
-from ..tftp_errors import TftpError
+from ..tftp_errors import TftpCancelled, TftpError
 from ..tftp_net import FamilyMode
 from ..tftp_server import TftpServer, is_servable_name
 from . import motion, theme
@@ -82,7 +104,13 @@ from .components import (
 from .logging_bridge import LogBridge
 
 APP_TITLE = "TFTP Console"
+ORG_NAME = "Nhom11"
 MODE_ITEMS = ("octet", "netascii")
+DEFAULT_TRANSFER_TIMEOUT = 5
+DEFAULT_TRANSFER_RETRIES = 5
+SETTINGS_SAVE_DELAY_MS = 400
+TRANSFER_JOIN_MS = 2000
+TRANSFER_CLOSE_JOIN_MS = 3000
 MAX_LOG_LINES = 1000
 
 PAGE_OVERVIEW = 0
@@ -90,6 +118,51 @@ PAGE_TRANSFER = 1
 PAGE_SERVER = 2
 PAGE_LOG = 3
 NAV_ITEMS = ("Tổng quan", "Truyền file", "Máy chủ", "Nhật ký")
+
+
+def ensure_application_identity() -> None:
+    """Đặt org/app cho QSettings nếu app chưa có (ví dụ khi test dựng tay)."""
+    if not QCoreApplication.organizationName():
+        QCoreApplication.setOrganizationName(ORG_NAME)
+    current = QCoreApplication.applicationName()
+    # QApplication([]) mặc định lấy tên file thực thi ("python"), không phải
+    # tên sản phẩm; coi đó là "chưa đặt" để QSettings không rơi vào
+    # org/Nhom11/python.
+    if not current or current.lower() in {
+        "python",
+        "python.exe",
+        "pythonw",
+        "pythonw.exe",
+        "pytest",
+        "pytest.exe",
+    }:
+        QCoreApplication.setApplicationName(APP_TITLE)
+
+
+@dataclass(frozen=True)
+class TransferJob:
+    """Một việc truyền trong hàng đợi FIFO."""
+
+    direction: str
+    client: TftpClient
+    source: str
+    target: str
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+class _LogBlockData(QTextBlockUserData):
+    """Gắn mức log vào từng `QTextBlock` để bộ lọc không phải đoán từ nội dung.
+
+    Trước đây `_rebuild_log` tìm chuỗi `" INFO "` trong text hiển thị, nhưng
+    formatter chỉ in `"HH:MM:SS  nội dung"` — nên chọn "Cảnh báo + lỗi" cho ra
+    nhật ký rỗng. Test cũ nhồi sẵn chữ "INFO" vào text nên vẫn pass.
+    """
+
+    __slots__ = ("level",)
+
+    def __init__(self, level: str) -> None:
+        super().__init__()
+        self.level = level
 
 
 def human_size(size: float) -> str:
@@ -162,6 +235,7 @@ class TransferWorker(QObject):
     progress = Signal(int, object)
     finished_ok = Signal(str)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, client: TftpClient, direction: str, source: str, target: str) -> None:
         super().__init__()
@@ -169,6 +243,9 @@ class TransferWorker(QObject):
         self.direction = direction
         self.source = source
         self.target = target
+        # Cùng một Event với client: nút Hủy chỉ cần set() là client dừng ở
+        # điểm kiểm tra kế tiếp và dọn file dở.
+        self.cancel_event = client.cancel_event
 
     @Slot()
     def run(self) -> None:
@@ -177,10 +254,15 @@ class TransferWorker(QObject):
                 result = self.client.download(self.source, self.target, progress=self._emit)
             else:
                 result = self.client.upload(self.source, self.target, progress=self._emit)
+        except TftpCancelled:
+            # Hủy theo yêu cầu là trạng thái trung tính, không phải lỗi mạng.
+            self.cancelled.emit()
         except TftpError as exc:
             self.failed.emit(str(exc))
         except OSError as exc:
             self.failed.emit(f"Lỗi hệ thống: {exc}")
+        except Exception as exc:  # noqa: BLE001 - thread không được chết im lặng
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
         else:
             self.finished_ok.emit(result)
 
@@ -278,8 +360,10 @@ class StatusBar(Surface):
 
 # -------------------------------------------------------------- main window ---
 class MainWindow(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
+        ensure_application_identity()
+        self.settings = settings if settings is not None else QSettings()
         self.setWindowTitle(APP_TITLE)
         self.resize(1320, 860)
         self.setMinimumSize(1000, 660)
@@ -291,11 +375,20 @@ class MainWindow(QWidget):
         self.server_thread: ServerThread | None = None
         self.transfer_thread: QThread | None = None
         self.transfer_worker: TransferWorker | None = None
+        self._transfer_queue: deque[TransferJob] = deque()
+        self._active_job: TransferJob | None = None
         self.theme_name = "light"
         self._intro_fade: QPropertyAnimation | None = None
         self._log_lines: list[tuple[str, str]] = []
-        self._close_pending = False
+        self._closing = False
         self._stopping = False
+
+        # Ghi cấu hình theo nhịp debounce: chỉ chạm đĩa sau khi người dùng
+        # ngừng gõ, và luôn ghi lần cuối khi đóng cửa sổ.
+        self._settings_timer = QTimer(self)
+        self._settings_timer.setSingleShot(True)
+        self._settings_timer.setInterval(SETTINGS_SAVE_DELAY_MS)
+        self._settings_timer.timeout.connect(self._save_settings)
 
         self.log_bridge = LogBridge(self)
         self.uptime = motion.Ticker(1000, self)
@@ -326,6 +419,9 @@ class MainWindow(QWidget):
         self.log_bridge.attach(callback=self._on_log)
         self.log_bridge.packet.connect(self._on_packet)
         self._install_shortcuts()
+        self._load_settings()
+        self._connect_settings_signals()
+        self._refresh_transfer_controls()
         self._set_running(False)
         self._set_backgrounds()
         self._refresh_files(quiet=True)
@@ -340,6 +436,98 @@ class MainWindow(QWidget):
             action.setShortcut(sequence)
             action.triggered.connect(slot)
             self.addAction(action)
+
+    # --------------------------------------------------------------- settings ---
+    def _setting_text(self, key: str, default: str = "") -> str:
+        value = self.settings.value(key, default)
+        return default if value is None else str(value)
+
+    def _setting_int(self, key: str, default: int) -> int:
+        value = self.settings.value(key, default)
+        if isinstance(value, int):
+            return value
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _load_settings(self) -> None:
+        """Khôi phục cấu hình lần chạy trước; thiếu khoá thì giữ mặc định."""
+        self.host_edit.setText(self._setting_text("server/host", self.host_edit.text()))
+        self.port_spin.setValue(self._setting_int("server/port", self.port_spin.value()))
+        root = self._setting_text("server/root", self.root_edit.text())
+        if root:
+            self.root_edit.setText(root)
+            self.root_edit.setCursorPosition(len(root))
+        self.blksize_spin.setValue(
+            self._setting_int("server/blksize", self.blksize_spin.value())
+        )
+        for spin in (self.download_blksize, self.upload_blksize):
+            spin.setValue(self._setting_int("transfer/blksize", spin.value()))
+        for spin in (self.download_timeout, self.upload_timeout):
+            spin.setValue(self._setting_int("transfer/timeout", spin.value()))
+        for spin in (self.download_retries, self.upload_retries):
+            spin.setValue(self._setting_int("transfer/retries", spin.value()))
+        mode = self._setting_text("transfer/mode", self.download_mode.currentText())
+        for combo in (self.download_mode, self.upload_mode):
+            index = combo.findText(mode)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        target = self._setting_text("transfer/target", self.target_edit.text())
+        if target:
+            self.target_edit.setText(target)
+        save_path = self._setting_text("transfer/download_path")
+        if save_path:
+            self.download_save.setText(save_path)
+        upload_path = self._setting_text("transfer/upload_path")
+        if upload_path:
+            self.upload_pick.setText(upload_path)
+        self._set_theme(self._setting_text("ui/theme", self.theme_name))
+        geometry = self._setting_text("ui/geometry")
+        if geometry:
+            try:
+                self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+            except (TypeError, ValueError):
+                pass
+
+    def _save_settings(self) -> None:
+        self.settings.setValue("server/host", self.host_edit.text().strip())
+        self.settings.setValue("server/port", self.port_spin.value())
+        self.settings.setValue("server/root", self.root_edit.text().strip())
+        self.settings.setValue("server/blksize", self.blksize_spin.value())
+        self.settings.setValue("transfer/blksize", self.download_blksize.value())
+        self.settings.setValue("transfer/timeout", self.download_timeout.value())
+        self.settings.setValue("transfer/retries", self.download_retries.value())
+        self.settings.setValue("transfer/mode", self.download_mode.currentText())
+        self.settings.setValue("transfer/target", self.target_edit.text().strip())
+        self.settings.setValue("transfer/download_path", self.download_save.text())
+        self.settings.setValue("transfer/upload_path", self.upload_pick.text())
+        self.settings.setValue("ui/theme", self.theme_name)
+        self.settings.setValue(
+            "ui/geometry",
+            bytes(self.saveGeometry().toBase64().data()).decode("ascii"),
+        )
+        self.settings.sync()
+
+    def _schedule_settings_save(self, *_args: object) -> None:
+        self._settings_timer.start()
+
+    def _connect_settings_signals(self) -> None:
+        self.host_edit.textChanged.connect(self._schedule_settings_save)
+        self.port_spin.spin.valueChanged.connect(self._schedule_settings_save)
+        self.root_edit.textChanged.connect(self._schedule_settings_save)
+        self.blksize_spin.spin.valueChanged.connect(self._schedule_settings_save)
+        self.download_blksize.spin.valueChanged.connect(self._schedule_settings_save)
+        self.upload_blksize.spin.valueChanged.connect(self._schedule_settings_save)
+        self.download_timeout.spin.valueChanged.connect(self._schedule_settings_save)
+        self.upload_timeout.spin.valueChanged.connect(self._schedule_settings_save)
+        self.download_retries.spin.valueChanged.connect(self._schedule_settings_save)
+        self.upload_retries.spin.valueChanged.connect(self._schedule_settings_save)
+        self.download_mode.currentTextChanged.connect(self._schedule_settings_save)
+        self.upload_mode.currentTextChanged.connect(self._schedule_settings_save)
+        self.target_edit.textChanged.connect(self._schedule_settings_save)
+        self.download_save.edit.textChanged.connect(self._schedule_settings_save)
+        self.upload_pick.edit.textChanged.connect(self._schedule_settings_save)
 
     @staticmethod
     def _page(content: QWidget) -> QScrollArea:
@@ -438,9 +626,15 @@ class MainWindow(QWidget):
         self.tile_download = ActionTile(
             "Tải file về", "Chọn file trên server và tải xuống máy.", "down"
         )
+        self.tile_download.setAccessibleName(
+            "Tải file về — mở trang Truyền file để chọn file cần tải"
+        )
         self.tile_download.clicked.connect(lambda: self.go_to(PAGE_TRANSFER))
         self.tile_upload = ActionTile(
             "Gửi file lên", "Kéo thả file hoặc chọn từ đĩa để ghi lên server.", "upload"
+        )
+        self.tile_upload.setAccessibleName(
+            "Gửi file lên — mở trang Truyền file để chọn file cần gửi"
         )
         self.tile_upload.clicked.connect(lambda: self.go_to(PAGE_TRANSFER))
         for tile in (self.tile_download, self.tile_upload):
@@ -491,6 +685,29 @@ class MainWindow(QWidget):
         target_row.addWidget(sync_button, 0)
         grid.addLayout(target_row)
 
+        # Hàng điều khiển phiên: trạng thái hàng đợi + hủy phiên đang chạy.
+        queue_row = QHBoxLayout()
+        queue_row.setSpacing(8)
+        self.queue_status = QLabel("Không có phiên truyền nào · hàng đợi trống")
+        self.queue_status.setFont(theme.font(8.5))
+        self.queue_status.setAccessibleName("Trạng thái hàng đợi truyền file")
+        muted(self.queue_status, "text_subtle")
+        queue_row.addWidget(self.queue_status, 1)
+        self.cancel_button = make_button(
+            "Hủy phiên đang truyền", "danger", "Dừng phiên đang chạy; file dở được dọn sạch"
+        )
+        self.cancel_button.setAccessibleName("Hủy phiên truyền đang chạy")
+        self.cancel_button.setMinimumHeight(34)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._cancel_transfer)
+        queue_row.addWidget(self.cancel_button, 0)
+        self.queue_clear_button = make_button("Xóa hàng đợi", "ghost", minimum_height=34)
+        self.queue_clear_button.setAccessibleName("Xóa các việc đang chờ trong hàng đợi")
+        self.queue_clear_button.setEnabled(False)
+        self.queue_clear_button.clicked.connect(self._clear_transfer_queue)
+        queue_row.addWidget(self.queue_clear_button, 0)
+        grid.addLayout(queue_row)
+
         columns = QHBoxLayout()
         columns.setSpacing(20)
         self.download_card = self._build_download_card()
@@ -531,11 +748,23 @@ class MainWindow(QWidget):
         self.download_name = QLineEdit()
         self.download_name.setPlaceholderText("sample.bin")
         self.download_name.setMinimumHeight(34)
+        self.download_name.setAccessibleName("Tên file cần tải trên server")
         self.download_save = FilePicker("Lưu thành", save_mode=True)
+        self.download_save.edit.setAccessibleName("Đường dẫn lưu file tải về")
         self.download_mode = ChevronComboBox()
         self.download_mode.addItems(MODE_ITEMS)
-        self.download_mode.setFixedWidth(200)
-        self.download_blksize = NumberInput(8, 65464, 1468, width=120)
+        self.download_mode.setFixedWidth(140)
+        self.download_mode.setAccessibleName("Chế độ truyền của file tải về")
+        self.download_blksize = NumberInput(8, 65464, 1468, width=100)
+        self.download_blksize.spin.setAccessibleName("Kích thước block khi tải về")
+        self.download_timeout = NumberInput(
+            1, 120, DEFAULT_TRANSFER_TIMEOUT, suffix=" s", width=90
+        )
+        self.download_timeout.spin.setAccessibleName("Timeout mỗi gói khi tải về, giây")
+        self.download_retries = NumberInput(
+            1, 20, DEFAULT_TRANSFER_RETRIES, width=90
+        )
+        self.download_retries.spin.setAccessibleName("Số lần thử lại khi tải về")
 
         form = QVBoxLayout()
         form.setSpacing(12)
@@ -545,11 +774,14 @@ class MainWindow(QWidget):
         row.setSpacing(12)
         row.addWidget(Field("Chế độ", self.download_mode))
         row.addWidget(Field("blksize", self.download_blksize))
+        row.addWidget(Field("timeout", self.download_timeout))
+        row.addWidget(Field("Số lần thử", self.download_retries))
         row.addStretch(1)
         form.addLayout(row)
 
         self.download_button = make_button("Tải về", "primary")
         self.download_button.setMinimumHeight(40)
+        self.download_button.setAccessibleName("Tải file về máy")
         self.download_button.clicked.connect(self._start_download)
 
         self.download_banner = ErrorBanner()
@@ -575,13 +807,23 @@ class MainWindow(QWidget):
         card.add(header)
 
         self.upload_pick = FilePicker("Chọn file nguồn")
+        self.upload_pick.edit.setAccessibleName("Đường dẫn file cần gửi lên server")
         self.upload_remote = QLineEdit()
         self.upload_remote.setPlaceholderText("uploaded.bin")
         self.upload_remote.setMinimumHeight(34)
+        self.upload_remote.setAccessibleName("Tên file khi lưu trên server")
         self.upload_mode = ChevronComboBox()
         self.upload_mode.addItems(MODE_ITEMS)
-        self.upload_mode.setFixedWidth(200)
-        self.upload_blksize = NumberInput(8, 65464, 1468, width=120)
+        self.upload_mode.setFixedWidth(140)
+        self.upload_mode.setAccessibleName("Chế độ truyền của file gửi lên")
+        self.upload_blksize = NumberInput(8, 65464, 1468, width=100)
+        self.upload_blksize.spin.setAccessibleName("Kích thước block khi gửi lên")
+        self.upload_timeout = NumberInput(
+            1, 120, DEFAULT_TRANSFER_TIMEOUT, suffix=" s", width=90
+        )
+        self.upload_timeout.spin.setAccessibleName("Timeout mỗi gói khi gửi lên, giây")
+        self.upload_retries = NumberInput(1, 20, DEFAULT_TRANSFER_RETRIES, width=90)
+        self.upload_retries.spin.setAccessibleName("Số lần thử lại khi gửi lên")
         self.upload_drop = DropZone("Kéo file vào đây\nhoặc bấm để chọn")
         self.upload_drop.fileDropped.connect(self._on_upload_dropped)
 
@@ -593,12 +835,15 @@ class MainWindow(QWidget):
         row.setSpacing(12)
         row.addWidget(Field("Chế độ", self.upload_mode))
         row.addWidget(Field("blksize", self.upload_blksize))
+        row.addWidget(Field("timeout", self.upload_timeout))
+        row.addWidget(Field("Số lần thử", self.upload_retries))
         row.addStretch(1)
         form.addLayout(row)
         form.addWidget(self.upload_drop)
 
         self.upload_button = make_button("Gửi lên", "primary")
         self.upload_button.setMinimumHeight(40)
+        self.upload_button.setAccessibleName("Gửi file lên server")
         self.upload_button.clicked.connect(self._start_upload)
 
         self.upload_banner = ErrorBanner()
@@ -819,6 +1064,10 @@ class MainWindow(QWidget):
         self.log_filter = ChevronComboBox()
         self.log_filter.addItems(["Tất cả", "Thông tin", "Cảnh báo + lỗi"])
         self.log_filter.setFixedWidth(170)
+        self.log_filter.setAccessibleName("Lọc mức nhật ký")
+        self.log_filter.setAccessibleDescription(
+            "Chọn Tất cả, Thông tin, hoặc Cảnh báo + lỗi"
+        )
         self.log_filter.currentIndexChanged.connect(self._rebuild_log)
         toolbar.addWidget(self.log_filter)
 
@@ -984,17 +1233,24 @@ class MainWindow(QWidget):
     @Slot(str, str)
     def _on_log(self, level: str, text: str) -> None:
         self._log_lines.append((level, text))
-        if len(self._log_lines) > MAX_LOG_LINES:
-            del self._log_lines[: len(self._log_lines) - MAX_LOG_LINES]
-            self._refresh_log_view()
-        else:
-            self._append_log_line(level, text)
-            self.log_count.setText(f"{len(self._log_lines)} dòng")
+        self._append_log_line(level, text)
+        overflow = len(self._log_lines) - MAX_LOG_LINES
+        if overflow > 0:
+            # Cắt phần đầu bằng cách xoá block, không dựng lại cả document:
+            # bản cũ gọi `_refresh_log_view()` mỗi dòng sau khi đầy 1000 dòng,
+            # tức O(n) cho từng dòng log và rất giật khi bật packet debug.
+            del self._log_lines[:overflow]
+            self._drop_log_blocks(overflow)
+        self.log_count.setText(f"{len(self._log_lines)} dòng")
         self.activity.push(level, text)
         if self.log_autoscroll.isChecked():
             self._scroll_log_to_end()
         if self.log_filter.currentIndex() != 0:
-            self._rebuild_log()
+            # Chỉ đổi visibility của block vừa thêm: rebuild toàn bộ mỗi dòng
+            # là O(n) và làm nhật ký 1000 dòng giật khi đang bật bộ lọc.
+            block = self.log_view.document().lastBlock()
+            if block.isValid():
+                block.setVisible(self._keep_level(self.log_filter.currentIndex(), level))
         if level in ("ERROR", "CRITICAL"):
             # ElidedLabel tự cắt bằng "…" theo bề rộng thật; cắt tay 90 ký tự
             # cuối chỉ giữ phần đuôi nên mất chính phần mô tả lỗi.
@@ -1014,6 +1270,19 @@ class MainWindow(QWidget):
         safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         color = self._log_color(level, theme.current_tokens())
         self.log_view.append(f'<span style="color:{color}">{safe}</span>')
+        block = self.log_view.document().lastBlock()
+        if block.isValid():
+            block.setUserData(_LogBlockData(level))
+
+    def _drop_log_blocks(self, count: int) -> None:
+        """Xoá `count` block đầu của log view (O(count), không dựng lại)."""
+        document = self.log_view.document()
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        for _ in range(count):
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def _refresh_log_view(self) -> None:
         """Vẽ lại toàn bộ log từ `_log_lines`: đổi màu theo theme + cắt tràn."""
@@ -1023,20 +1292,28 @@ class MainWindow(QWidget):
         self.log_count.setText(f"{len(self._log_lines)} dòng")
         self._rebuild_log()
 
+    @staticmethod
+    def _keep_level(mode: int, level: str) -> bool:
+        """Bộ lọc mức: 0 = tất cả, 1 = thông tin, 2 = cảnh báo + lỗi."""
+        if mode == 0:
+            return True
+        if mode == 1:
+            return level in ("DEBUG", "INFO")
+        return level in ("WARNING", "ERROR", "CRITICAL")
+
     @Slot()
     def _rebuild_log(self) -> None:
         """Lọc nhật ký theo mức độ chọn ở thanh công cụ."""
         mode = self.log_filter.currentIndex()
         block = self.log_view.document().begin()
         while block.isValid():
-            text = block.text()
-            if mode == 0:
-                keep = True
-            elif mode == 1:
-                keep = " INFO " in text or "DEBUG" in text
+            data = block.userData()
+            if not isinstance(data, _LogBlockData):
+                # Block rỗng/không rõ mức (ví dụ dòng trống đầu tài liệu) chỉ
+                # hiện khi chọn "Tất cả"; nếu không sẽ thành dòng ma khi lọc.
+                block.setVisible(mode == 0)
             else:
-                keep = any(level in text for level in ("WARNING", "ERROR", "CRITICAL"))
-            block.setVisible(keep)
+                block.setVisible(self._keep_level(mode, data.level))
             block = block.next()
 
     @Slot()
@@ -1081,7 +1358,11 @@ class MainWindow(QWidget):
     # ---------------------------------------------------------------- theme ---
     @Slot()
     def _toggle_theme(self) -> None:
-        self.theme_name = "dark" if self.theme_name == "light" else "light"
+        self._set_theme("light" if self.theme_name == "dark" else "dark")
+
+    def _set_theme(self, name: str) -> None:
+        """Áp theme (dùng cho cả nút đổi theme lẫn khôi phục QSettings)."""
+        self.theme_name = "dark" if name == "dark" else "light"
         app = QApplication.instance()
         if app is not None:
             theme.apply_theme(app, self.theme_name)
@@ -1092,6 +1373,7 @@ class MainWindow(QWidget):
         self._restyle_token_labels()
         self._set_backgrounds()
         self._refresh_server_files()
+        self._settings_timer.start()
 
     def _restyle_token_labels(self) -> None:
         """Cập nhật lại màu QSS của các QLabel gắn token khi đổi theme.
@@ -1496,44 +1778,141 @@ class MainWindow(QWidget):
     def _start_transfer(
         self, direction: str, client: TftpClient, source: str, target: str
     ) -> None:
-        if self.transfer_thread is not None:
-            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
+        """Tương thích API cũ: mọi lượt truyền giờ đi qua hàng đợi."""
+        self._enqueue_transfer(direction, client, source, target)
+
+    def _enqueue_transfer(
+        self, direction: str, client: TftpClient, source: str, target: str
+    ) -> None:
+        """Xếp việc vào hàng đợi FIFO; chạy ngay nếu chưa có phiên nào."""
+        existing = getattr(client, "cancel_event", None)
+        event = existing if isinstance(existing, threading.Event) else threading.Event()
+        client.cancel_event = event
+        self._transfer_queue.append(
+            TransferJob(direction, client, source, target, event)
+        )
+        if self.transfer_thread is None:
+            self._start_next_transfer()
             return
-        self.transfer_thread = QThread(self)
-        self.transfer_worker = TransferWorker(client, direction, source, target)
-        self.transfer_worker.moveToThread(self.transfer_thread)
-        self.transfer_thread.started.connect(self.transfer_worker.run)
+        self._refresh_transfer_controls()
+        label = "tải" if direction == "download" else "gửi"
+        self.status_bar.message.setText(
+            f"Đã xếp hàng {label} '{os.path.basename(source)}' · "
+            f"{len(self._transfer_queue)} việc chờ"
+        )
 
-        download = direction == "download"
-        (self.download_progress if download else self.upload_progress).reset()
+    @Slot()
+    def _start_next_transfer(self) -> None:
+        """Khởi động việc kế tiếp nếu GUI đang rảnh và hàng đợi còn việc."""
+        if self.transfer_thread is not None or not self._transfer_queue:
+            self._refresh_transfer_controls()
+            return
+        job = self._transfer_queue.popleft()
+        self._active_job = job
+        download = job.direction == "download"
 
-        worker = self.transfer_worker
+        thread = QThread(self)
+        worker = TransferWorker(job.client, job.direction, job.source, job.target)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        # Xoá đối tượng Qt ngay khi thread kết thúc; nếu để lại, mỗi phiên
+        # truyền sẽ giữ một QThread + worker sống tới khi đóng app.
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self.transfer_thread = thread
+        self.transfer_worker = worker
         worker.progress.connect(
             self._on_download_progress if download else self._on_upload_progress
         )
         worker.finished_ok.connect(self._on_download_ok if download else self._on_upload_ok)
         worker.failed.connect(self._on_download_err if download else self._on_upload_err)
+        worker.cancelled.connect(
+            self._on_download_cancelled if download else self._on_upload_cancelled
+        )
         worker.finished_ok.connect(self._transfer_done)
         worker.failed.connect(self._transfer_done)
+        worker.cancelled.connect(self._transfer_finished_cancelled)
 
-        self.transfer_thread.start()
-        # Chỉ một phiên tại một thời điểm: bật cả hai nút sẽ cho phép phiên
-        # ngược chiều ghi đè transfer_thread/worker (và phiên đầu quit nhầm).
-        self.download_button.setEnabled(False)
-        self.upload_button.setEnabled(False)
+        bar = self.download_progress if download else self.upload_progress
+        bar.reset()
+        bar.set_busy(True)
+        header = self.download_header if download else self.upload_header
+        header.set_badge("ĐANG TẢI" if download else "ĐANG GỬI")
+        (self.download_banner if download else self.upload_banner).clear()
+        if download:
+            self.download_status.setText(f"Đang tải '{job.source}' từ server...")
+        else:
+            self.upload_status.setText(
+                f"Đang gửi '{os.path.basename(job.source)}' lên server..."
+            )
+
+        thread.start()
+        self._refresh_transfer_controls()
+
+    def _refresh_transfer_controls(self) -> None:
+        """Cập nhật nhãn hàng đợi + trạng thái nút hủy/xóa hàng đợi."""
+        active = self._active_job
+        pending = len(self._transfer_queue)
+        if active is None:
+            text = "Không có phiên truyền nào"
+        else:
+            verb = "tải" if active.direction == "download" else "gửi"
+            text = f"Đang {verb} '{os.path.basename(active.source)}'"
+        text += f" · {pending} việc chờ" if pending else " · hàng đợi trống"
+        self.queue_status.setText(text)
+        self.cancel_button.setEnabled(active is not None)
+        self.queue_clear_button.setEnabled(pending > 0)
+
+    def _request_cancel(self) -> bool:
+        """Set cancel_event của phiên đang chạy; trả False nếu không có."""
+        job = self._active_job
+        if job is None or self.transfer_thread is None:
+            return False
+        job.cancel_event.set()
+        worker = self.transfer_worker
+        if worker is not None and worker.cancel_event is not None:
+            worker.cancel_event.set()
+        return True
+
+    @Slot()
+    def _cancel_transfer(self) -> None:
+        if not self._request_cancel():
+            self.status_bar.message.setText("Không có phiên truyền nào để hủy")
+            return
+        self.cancel_button.setEnabled(False)
+        self.queue_status.setText("Đang hủy phiên truyền...")
+        self.status_bar.message.setText("Đang hủy phiên truyền theo yêu cầu...")
+
+    @Slot()
+    def _clear_transfer_queue(self) -> None:
+        count = len(self._transfer_queue)
+        if not count:
+            self.status_bar.message.setText("Hàng đợi đang trống")
+            return
+        self._transfer_queue.clear()
+        self._refresh_transfer_controls()
+        self.status_bar.message.setText(f"Đã xóa {count} việc khỏi hàng đợi")
+
+    @Slot()
+    def _transfer_finished_cancelled(self) -> None:
+        self._transfer_done("")
 
     @Slot(str)
     def _transfer_done(self, _result: str) -> None:
+        if self._closing:
+            return
         thread, self.transfer_thread = self.transfer_thread, None
         self.transfer_worker = None
+        self._active_job = None
         if thread is not None:
             thread.quit()
-            thread.wait(2000)
-        self.download_button.setEnabled(True)
-        self.upload_button.setEnabled(True)
-        if self._close_pending:
-            self._close_pending = False
-            self.close()
+            if not thread.wait(TRANSFER_JOIN_MS):
+                # Hàng đợi không được treo GUI nếu worker bỏ qua cancel_event
+                # (ví dụ client bên thứ ba); đây là lần cuối cùng ép dừng.
+                thread.terminate()
+                thread.wait(1000)
+        self._start_next_transfer()
 
     def _target_host_port(self) -> tuple[str, int] | None:
         text = self.target_edit.text().strip() or "127.0.0.1:6969"
@@ -1545,9 +1924,6 @@ class MainWindow(QWidget):
 
     @Slot()
     def _start_download(self) -> None:
-        if self.transfer_thread is not None:
-            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
-            return
         name = self.download_name.text().strip()
         if not name:
             self.status_bar.message.setText("Cần nhập tên file cần tải")
@@ -1560,15 +1936,12 @@ class MainWindow(QWidget):
         client = TftpClient(
             target[0],
             target[1],
-            timeout=5.0,
-            retries=5,
+            timeout=float(self.download_timeout.value()),
+            retries=self.download_retries.value(),
             blksize=self.download_blksize.value(),
             mode=self.download_mode.currentText(),
         )
-        self.download_header.set_badge("ĐANG TẢI")
-        self.download_banner.clear()
-        self.download_status.setText(f"Đang tải '{name}' từ {target[0]}:{target[1]}...")
-        self._start_transfer("download", client, name, save)
+        self._enqueue_transfer("download", client, name, save)
 
     @Slot(int, object)
     def _on_download_progress(self, done: int, total: int | None) -> None:
@@ -1605,10 +1978,20 @@ class MainWindow(QWidget):
         self.toast.show_message(f"Tải về thất bại: {message}", "err")
 
     @Slot()
+    def _on_download_cancelled(self) -> None:
+        """Hủy là trạng thái trung tính: không banner lỗi, không traceback."""
+        job = self._active_job
+        name = job.source if job is not None else "file"
+        self.download_progress.set_busy(False)
+        self.download_progress.reset()
+        self.download_header.set_badge("ĐÃ HỦY")
+        self.download_banner.clear()
+        self.download_status.setText(f"Đã hủy tải '{name}'")
+        self.status_bar.message.setText(f"Đã hủy tải '{name}' theo yêu cầu")
+        self.toast.show_message(f"Đã hủy tải '{name}'", "info")
+
+    @Slot()
     def _start_upload(self) -> None:
-        if self.transfer_thread is not None:
-            self.status_bar.message.setText("Đang có một phiên truyền khác — đợi xong đã")
-            return
         source = self.upload_pick.text().strip()
         if not source or not os.path.isfile(source):
             self.upload_pick.set_error("Chọn một file có thật trên đĩa")
@@ -1622,17 +2005,12 @@ class MainWindow(QWidget):
         client = TftpClient(
             target[0],
             target[1],
-            timeout=5.0,
-            retries=5,
+            timeout=float(self.upload_timeout.value()),
+            retries=self.upload_retries.value(),
             blksize=self.upload_blksize.value(),
             mode=self.upload_mode.currentText(),
         )
-        self.upload_header.set_badge("ĐANG GỬI")
-        self.upload_banner.clear()
-        self.upload_status.setText(
-            f"Đang gửi '{os.path.basename(source)}' lên {target[0]}:{target[1]}..."
-        )
-        self._start_transfer("upload", client, source, remote)
+        self._enqueue_transfer("upload", client, source, remote)
 
     @Slot(int, object)
     def _on_upload_progress(self, done: int, total: int | None) -> None:
@@ -1668,6 +2046,18 @@ class MainWindow(QWidget):
         self.status_bar.message.setText(f"Gửi lên thất bại: {message}")
         self.toast.show_message(f"Gửi lên thất bại: {message}", "err")
 
+    @Slot()
+    def _on_upload_cancelled(self) -> None:
+        job = self._active_job
+        name = os.path.basename(job.source) if job is not None else "file"
+        self.upload_progress.set_busy(False)
+        self.upload_progress.reset()
+        self.upload_header.set_badge("ĐÃ HỦY")
+        self.upload_banner.clear()
+        self.upload_status.setText(f"Đã hủy gửi '{name}'")
+        self.status_bar.message.setText(f"Đã hủy gửi '{name}' theo yêu cầu")
+        self.toast.show_message(f"Đã hủy gửi '{name}'", "info")
+
     # ------------------------------------------------------------------ misc ---
     @Slot()
     def _on_tick(self) -> None:
@@ -1694,23 +2084,29 @@ class MainWindow(QWidget):
         super().resizeEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - tên do Qt đặt
-        # Đang truyền file thì chưa đóng: QThread còn chạy mà bị destroy sẽ làm
-        # Qt abort cả tiến trình. Đóng nốt khi phiên truyền kết thúc.
-        if self.transfer_thread is not None and self.transfer_thread.isRunning():
-            self._close_pending = True
-            self.status_bar.message.setText(
-                "Đang truyền file — cửa sổ sẽ đóng khi phiên truyền kết thúc"
-            )
-            event.ignore()
-            return
-        # Đóng cửa sổ là lúc duy nhất được phép chờ đồng bộ.
+        # Ghi cấu hình lần cuối; sau đó hủy phiên đang chạy, bỏ hàng đợi và
+        # join thread có giới hạn thời gian — không để cửa sổ treo.
+        self._save_settings()
+        self._closing = True
+        if self._transfer_queue:
+            self._transfer_queue.clear()
+        self._request_cancel()
+        self._refresh_transfer_controls()
         self._shutdown()
         super().closeEvent(event)
 
     def _shutdown(self) -> None:
-        self._stop_server_blocking()
         thread = self.transfer_thread
         if thread is not None:
+            self._request_cancel()
             thread.quit()
-            thread.wait(2000)
+            if not thread.wait(TRANSFER_CLOSE_JOIN_MS):
+                # Worker không phản hồi cancel (client bên thứ ba): đây là
+                # lần cuối cùng được phép ép dừng trước khi Qt destroy thread.
+                thread.terminate()
+                thread.wait(1000)
+            self.transfer_thread = None
+            self.transfer_worker = None
+            self._active_job = None
+        self._stop_server_blocking()
         self.log_bridge.detach()

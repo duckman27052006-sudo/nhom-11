@@ -101,6 +101,8 @@ deploy/wireguard/generated/
 # cá nhân của nhóm, không phải mã nguồn.
 # ---------------------------------------------------------------------------
 report_build/
+deck_build/
+build_deck.py
 make_report_pptx.py
 make_contributions_pptx.py
 BaoCao_TFTP_Nhom11.docx

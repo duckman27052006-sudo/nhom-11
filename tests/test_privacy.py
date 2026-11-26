@@ -43,6 +43,8 @@ FORBIDDEN_CONTENT = [
 # Các quy tắc .gitignore phải còn, để không ai lỡ xoá mất lớp bảo vệ.
 REQUIRED_IGNORE = [
     "report_build/",
+    "deck_build/",
+    "build_deck.py",
     "make_report_pptx.py",
     "make_contributions_pptx.py",
     "*.docx",

@@ -87,11 +87,15 @@ class TestWebUpload(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_livez_and_readyz_split(self):
-        # Liveness chỉ cần SQLite; readiness mới probe TFTP. Trong test không
-        # có TFTP server nên readyz phải 503 còn livez vẫn 200.
+        # Liveness chỉ cần SQLite; readiness mới probe TFTP. Không giả định
+        # cổng 6969 trống: máy dev có thể đang chạy TFTP Console thật, khi đó
+        # probe sẽ thành công và test sẽ fail oan. Ép probe lỗi để kiểm đúng
+        # hợp đồng 503.
         live = self.client.get("/livez", base_url="http://upload.lan")
         self.assertEqual(live.status_code, 200)
-        ready = self.client.get("/readyz", base_url="http://upload.lan")
+        with patch("tftp.web_upload.TftpClient") as fake_client:
+            fake_client.return_value.download.side_effect = tftp_errors.TftpError("down")
+            ready = self.client.get("/readyz", base_url="http://upload.lan")
         self.assertEqual(ready.status_code, 503)
         self.assertEqual(ready.json["checks"]["tftp"], "unreachable")
 

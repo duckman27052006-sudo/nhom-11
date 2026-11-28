@@ -157,6 +157,20 @@ Kiểm tra kết quả: `files/uploaded.bin` sẽ xuất hiện với nội dung
 Trên Windows, mở `tftp.bat` — script tự kiểm tra `.venv`, cài PySide6 nếu thiếu,
 rồi mở thẳng giao diện **TFTP Console** (không còn menu terminal).
 
+`tftp.bat` chạy GUI và web gateway trong **một console duy nhất** (xem
+`tftp/tftp_run.py`). Tắt app bằng một trong ba cách — đóng cửa sổ GUI, `Ctrl+C`
+ở console, hoặc đóng console — cả hai cổng **TCP 8080** và **UDP 6969** đều được
+nhả. Nếu app bị treo, chạy `stop.bat` để dừng mọi tiến trình còn sót và chờ cổng
+trống:
+
+```bat
+stop.bat
+```
+
+Trước đây mỗi dịch vụ mở một cửa sổ riêng, nên đóng GUI vẫn để web gateway giữ
+cổng 8080 và lần mở sau báo `[WinError 10048] Only one usage of each socket address`.
+Nay `tftp.bat` kiểm tra cổng trước khi chạy và báo rõ nếu cần `stop.bat`.
+
 Cũng có thể mở trực tiếp từ thư mục dự án:
 
 ```bash
